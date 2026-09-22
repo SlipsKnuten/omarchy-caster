@@ -1,0 +1,215 @@
+diff --git i/cast/standalone_common/ffmpeg_glue.cc w/cast/standalone_common/ffmpeg_glue.cc
+index 5a9e4f4..8afe2f5 100644
+--- i/cast/standalone_common/ffmpeg_glue.cc
++++ w/cast/standalone_common/ffmpeg_glue.cc
+@@ -5,6 +5,7 @@
+ #include "cast/standalone_common/ffmpeg_glue.h"
+ 
+ #include <libavcodec/version.h>
++#include <string_view>
+ 
+ #include "util/osp_logging.h"
+ #include "util/std_util.h"
+@@ -21,7 +22,13 @@ AVFormatContext* CreateAVFormatContextForFile(const char* path) {
+ #pragma GCC diagnostic pop
+ #endif  // LIBAVCODEC_VERSION_MAJOR < 59
+ 
+-  int result = avformat_open_input(&format_context, path, nullptr, nullptr);
++  AVDictionary* options = nullptr;
++  if (std::string_view(path).starts_with("pipe:")) {
++    av_dict_set(&options, "analyzeduration", "1", 0);
++    av_dict_set(&options, "probesize", "32768", 0);
++  }
++  int result = avformat_open_input(&format_context, path, nullptr, &options);
++  av_dict_free(&options);
+   if (result < 0) {
+     OSP_LOG_ERROR << "Cannot open " << path << ": " << AvErrorToString(result);
+     return nullptr;
+diff --git i/cast/standalone_sender/connection_settings.h w/cast/standalone_sender/connection_settings.h
+index 2c43096..0d49107 100644
+--- i/cast/standalone_sender/connection_settings.h
++++ w/cast/standalone_sender/connection_settings.h
+@@ -22,6 +22,8 @@ struct ConnectionSettings {
+ 
+   // The path to the file that we want to play.
+   std::string path_to_file;
++  // Optional separate live audio input (e.g. an inherited pipe).
++  std::string audio_input_path;
+ 
+   // The maximum bitrate. Default value means a reasonable default will be
+   // selected.
+diff --git i/cast/standalone_sender/looping_file_cast_agent.cc w/cast/standalone_sender/looping_file_cast_agent.cc
+index 38e222c..f5ea285 100644
+--- i/cast/standalone_sender/looping_file_cast_agent.cc
++++ w/cast/standalone_sender/looping_file_cast_agent.cc
+@@ -439,6 +439,12 @@ void LoopingFileCastAgent::OnStatisticsUpdated(
+   constexpr int kLoggingInterval = 10;
+   if ((num_times_on_statistics_updated_called_++ % kLoggingInterval) == 0) {
+     OSP_VLOG << __func__ << ": updated_stats=" << updated_stats;
++    const auto latency = static_cast<size_t>(StatisticType::kAvgEndToEndLatencyMs);
++    const auto fps = static_cast<size_t>(StatisticType::kEnqueueFps);
++    OSP_LOG_INFO << "Cast scheduled-playout latency (excludes upstream capture): video="
++                 << updated_stats.video_statistics[latency] << "ms audio="
++                 << updated_stats.audio_statistics[latency] << "ms; video fps="
++                 << updated_stats.video_statistics[fps];
+   }
+   last_reported_statistics_ = std::make_optional<SenderStats>(updated_stats);
+ }
+diff --git i/cast/standalone_sender/looping_file_sender.cc w/cast/standalone_sender/looping_file_sender.cc
+index 34c05df..8c93b33 100644
+--- i/cast/standalone_sender/looping_file_sender.cc
++++ w/cast/standalone_sender/looping_file_sender.cc
+@@ -133,7 +133,9 @@ void LoopingFileSender::SendFileAgain() {
+   capture_begin_time_ = latest_frame_time_ = env_.now() + seconds(1);
+   if (settings_.should_include_audio) {
+     audio_capturer_ = std::make_unique<SimulatedAudioCapturer>(
+-        env_, settings_.path_to_file.c_str(), audio_encoder_->num_channels(),
++        env_, settings_.audio_input_path.empty() ? settings_.path_to_file.c_str()
++                                                : settings_.audio_input_path.c_str(),
++        audio_encoder_->num_channels(),
+         audio_encoder_->sample_rate(), capture_begin_time_, *this);
+   }
+   video_capturer_ = std::make_unique<SimulatedVideoCapturer>(
+diff --git i/cast/standalone_sender/main.cc w/cast/standalone_sender/main.cc
+index 689e105..a4c9743 100644
+--- i/cast/standalone_sender/main.cc
++++ w/cast/standalone_sender/main.cc
+@@ -91,6 +91,8 @@ options:
+ 
+     -i, --enable-input-events: Enable receiving input events from the receiver.
+ 
++    -A, --audio-input=path: Separate live audio input for pipe:0 video.
++
+ )";
+ 
+   std::cerr << std::format(kTemplate, argv0, argv0, kDefaultCastPort,
+@@ -136,6 +138,7 @@ struct Arguments {
+   // Required positional arguments
+   const char* iface_or_endpoint = nullptr;
+   const char* file_path = nullptr;
++  std::string audio_input_path;
+ 
+   // Optional arguments
+   int max_bitrate = kDefaultMaxBitrate;
+@@ -157,6 +160,7 @@ std::optional<Arguments> ParseArgs(int argc, char* argv[]) {
+   // standalone sender, osp demo, and test_main argument options.
+   const get_opt::option kArgumentOptions[] = {
+       {"android-hack", no_argument, nullptr, 'a'},
++      {"audio-input", required_argument, nullptr, 'A'},
+       {"codec", required_argument, nullptr, 'c'},
+       {"developer-certificate", required_argument, nullptr, 'd'},
+       {"enable-input-events", no_argument, nullptr, 'i'},
+@@ -174,9 +178,12 @@ std::optional<Arguments> ParseArgs(int argc, char* argv[]) {
+ 
+   Arguments args;
+   int ch = -1;
+-  while ((ch = getopt_long(argc, argv, "ac:d:him:nqrtvP", kArgumentOptions,
++  while ((ch = getopt_long(argc, argv, "aA:c:d:him:nqrtvP", kArgumentOptions,
+                            nullptr)) != -1) {
+     switch (ch) {
++      case 'A':
++        args.audio_input_path = get_opt::optarg;
++        break;
+       case 'a':
+         args.use_android_rtp_hack = true;
+         break;
+@@ -294,8 +301,11 @@ int StandaloneSenderMain(int argc, char* argv[]) {
+ 
+     cast_agent->Connect({.receiver_endpoint = remote_endpoint,
+                          .path_to_file = args->file_path,
++                         .audio_input_path = args->audio_input_path,
+                          .max_bitrate = args->max_bitrate,
+                          .should_include_video = true,
++                         .should_include_audio = !args->audio_input_path.empty() ||
++                             std::string_view(args->file_path) != "pipe:0",
+                          .use_android_rtp_hack = args->use_android_rtp_hack,
+                          .use_remoting = args->use_remoting,
+                          .should_loop_video = args->should_loop_video,
+diff --git i/cast/standalone_sender/simulated_capturer.cc w/cast/standalone_sender/simulated_capturer.cc
+index 4ec6750..1fb6a53 100644
+--- i/cast/standalone_sender/simulated_capturer.cc
++++ w/cast/standalone_sender/simulated_capturer.cc
+@@ -11,6 +11,9 @@
+ #include <ratio>
+ #include <sstream>
+ #include <thread>
++#include <string_view>
++#include <cstdlib>
++#include <poll.h>
+ 
+ #include "cast/standalone_common/ffmpeg_glue.h"
+ #include "cast/streaming/public/environment.h"
+@@ -40,6 +43,10 @@ SimulatedCapturer::SimulatedCapturer(Environment& environment,
+       packet_(MakeUniqueAVPacket()),
+       decoded_frame_(MakeUniqueAVFrame()),
+       next_task_(environment.now_function(), environment.task_runner()) {
++  live_input_ = std::string_view(path).starts_with("pipe:");
++  if (live_input_) {
++    live_input_fd_ = std::atoi(path + 5);
++  }
+   if (!format_context_) {
+     OnError("MakeUniqueAVFormatContext", AVERROR_UNKNOWN);
+     return;  // Capturer is halted (unable to start).
+@@ -70,6 +77,10 @@ SimulatedCapturer::SimulatedCapturer(Environment& environment,
+   // max here, just to be safe.
+   decoder_context_->thread_count =
+       std::min(std::max<int>(std::thread::hardware_concurrency(), 1), 8);
++  if (live_input_) {
++    decoder_context_->thread_count = 1;
++    decoder_context_->flags |= AV_CODEC_FLAG_LOW_DELAY;
++  }
+   const int params_result = avcodec_parameters_to_context(
+       decoder_context_.get(),
+       format_context_->streams[stream_index_]->codecpar);
+@@ -137,6 +148,17 @@ void SimulatedCapturer::StartDecodingNextFrame() {
+     return;
+   }
+ 
++  // A file reader can block on live pipes. Avoid waiting for the next capture
++  // on the Cast task runner, which must keep servicing RTP feedback and audio.
++  if (live_input_) {
++    pollfd ready{live_input_fd_, POLLIN, 0};
++    if (poll(&ready, 1, 0) == 0) {
++      next_task_.ScheduleFromNow([this] { StartDecodingNextFrame(); },
++                                std::chrono::milliseconds(1));
++      return;
++    }
++  }
++
+   capture_begin_time_ = now_();
+   const int read_frame_result =
+       av_read_frame(format_context_.get(), packet_.get());
+@@ -225,6 +247,18 @@ void SimulatedCapturer::ConsumeNextDecodedFrame() {
+     return;  // Stop. Fatal error occurred.
+   }
+   reference_time += *delay_adjustment_or_null;
++  if (live_input_) {
++    if (media_type_ == AVMEDIA_TYPE_AUDIO) {
++      if (!live_audio_next_time_) {
++        live_audio_next_time_ = now_();
++      }
++      reference_time = *live_audio_next_time_;
++      *live_audio_next_time_ += ToApproximateClockDuration(
++          decoded_frame_->nb_samples, AVRational{1, decoded_frame_->sample_rate});
++    } else {
++      reference_time = now_();
++    }
++  }
+ 
+   next_task_.Schedule(
+       [this, reference_time] {
+diff --git i/cast/standalone_sender/simulated_capturer.h w/cast/standalone_sender/simulated_capturer.h
+index 5dcb0bc..b1360f6 100644
+--- i/cast/standalone_sender/simulated_capturer.h
++++ w/cast/standalone_sender/simulated_capturer.h
+@@ -115,6 +115,10 @@ class SimulatedCapturer {
+   // Used to determine playback rate. Currently, we only support "playing"
+   // at 1x speed, or "pausing" at 0x speed.
+   bool playback_rate_is_non_zero_ = true;
++  // Experimental live NUT input: desktop video or separate system audio pipe.
++  bool live_input_ = false;
++  int live_input_fd_ = -1;
++  std::optional<Clock::time_point> live_audio_next_time_;
+ };
+ 
+ // Emits the primary audio stream from a file.
