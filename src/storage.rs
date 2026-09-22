@@ -1,5 +1,5 @@
 //! XDG paths and atomic private state. No media is written to disk.
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     env, fs,
@@ -8,20 +8,33 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub fn directory(kind: &str) -> Result<PathBuf> {
+pub const APP_DIRECTORY: &str = "caster";
+const LEGACY_APP_DIRECTORY: &str = "omacast-dev";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Directory {
+    Runtime,
+    Config,
+    State,
+}
+
+fn base_directory(kind: Directory) -> Result<PathBuf> {
     let home = PathBuf::from(env::var_os("HOME").context("HOME is not set")?);
     let (key, fallback) = match kind {
-        "runtime" => (
+        Directory::Runtime => (
             "XDG_RUNTIME_DIR",
             PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })),
         ),
-        "config" => ("XDG_CONFIG_HOME", home.join(".config")),
-        "state" => ("XDG_STATE_HOME", home.join(".local/state")),
-        _ => bail!("Unknown XDG directory"),
+        Directory::Config => ("XDG_CONFIG_HOME", home.join(".config")),
+        Directory::State => ("XDG_STATE_HOME", home.join(".local/state")),
     };
     let base = env::var_os(key).map(PathBuf::from).unwrap_or(fallback);
     anyhow::ensure!(base.is_absolute(), "{key} must be absolute");
-    let path = base.join("omacast-dev");
+    Ok(base)
+}
+
+pub fn directory(kind: Directory) -> Result<PathBuf> {
+    let path = base_directory(kind)?.join(APP_DIRECTORY);
     fs::create_dir_all(&path)?;
     let metadata = fs::symlink_metadata(&path)?;
     anyhow::ensure!(
@@ -32,6 +45,14 @@ pub fn directory(kind: &str) -> Result<PathBuf> {
     );
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     Ok(path)
+}
+
+pub fn legacy_file(kind: Directory, name: &str) -> Result<PathBuf> {
+    anyhow::ensure!(
+        !name.is_empty() && !name.contains('/') && name != "." && name != "..",
+        "Invalid state filename"
+    );
+    Ok(base_directory(kind)?.join(LEGACY_APP_DIRECTORY).join(name))
 }
 
 pub fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {

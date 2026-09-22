@@ -4,8 +4,11 @@ use crate::{
     capture, config, storage, transport,
 };
 use anyhow::{Context, Result};
-use caster_core::{Quality, SessionState};
 pub use caster_core::{Request, Status};
+use caster_core::{
+    SessionState,
+    adapters::{AudioBackend, TransportBackend},
+};
 use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
@@ -28,10 +31,14 @@ extern "C" fn signal_stop(_: i32) {
 }
 
 fn save(status: &Status) -> Result<()> {
-    storage::write(&storage::directory("runtime")?.join("status.json"), status)
+    storage::write(
+        &storage::directory(storage::Directory::Runtime)?.join("status.json"),
+        status,
+    )
 }
 pub fn validate_audio(request: &Request) -> Result<()> {
     use capture::Kind;
+    let backend = audio::PulseAudioAdapter;
     anyhow::ensure!(
         !(request.audio == Mode::Application && request.source.kind != Kind::Window),
         "Application audio requires a selected window"
@@ -39,6 +46,10 @@ pub fn validate_audio(request: &Request) -> Result<()> {
     anyhow::ensure!(
         !(request.audio == Mode::System && request.source.kind == Kind::Window),
         "Window mode never captures system audio"
+    );
+    anyhow::ensure!(
+        backend.supports(&request.source, request.audio),
+        "Selected audio mode is not supported for this source"
     );
     Ok(())
 }
@@ -80,7 +91,8 @@ pub fn worker() -> Result<()> {
         );
         libc::signal(libc::SIGINT, signal_stop as *const () as libc::sighandler_t);
     }
-    let spec: Request = storage::read(&storage::directory("runtime")?.join("request.json"))?;
+    let spec: Request =
+        storage::read(&storage::directory(storage::Directory::Runtime)?.join("request.json"))?;
     let state = Arc::new(Mutex::new(Status {
         state: SessionState::Connecting,
         detail: "Starting native Cast".into(),
@@ -126,7 +138,23 @@ fn run(spec: &Request, state: Arc<Mutex<Status>>) -> Result<()> {
     audio::recover()?;
     capture::validate(&spec.source)?;
     let bins = config::binaries()?;
-    let quality = Quality::resolve(spec.quality, spec.bitrate);
+    let (profile, quality) =
+        caster_core::receiver_profiles::resolve_quality(&spec.receiver, spec.quality, spec.bitrate);
+    transport::OpenScreenTransport
+        .validate_quality(quality)
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    {
+        let mut status = state.lock().unwrap();
+        status.resolved_quality = format!(
+            "{}×{} · {} fps · {} Mbps · {}",
+            quality.width,
+            quality.height,
+            quality.fps,
+            quality.bitrate / 1_000_000,
+            profile.id
+        );
+        save(&status)?;
+    }
     let mut routing = if spec.audio == Mode::Application {
         Some(audio::AppAudio::new(spec.source.clone())?)
     } else {
@@ -142,7 +170,7 @@ fn run(spec: &Request, state: Arc<Mutex<Status>>) -> Result<()> {
         .truncate(true)
         .write(true)
         .mode(0o600)
-        .open(storage::directory("state")?.join("session.log"))?;
+        .open(storage::directory(storage::Directory::State)?.join("session.log"))?;
     let mut children = Processes(Vec::new());
     let mut audio_pipe = None;
     if let Some(monitor) = monitor {
@@ -156,7 +184,7 @@ fn run(spec: &Request, state: Arc<Mutex<Status>>) -> Result<()> {
         children.0.push(child);
     }
     let fd = audio_pipe.as_ref().map(AsRawFd::as_raw_fd);
-    let mut video = capture::command(&spec.source, quality, &bins.window_capture)?
+    let mut video = capture::command(&spec.source, quality)?
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(log.try_clone()?)

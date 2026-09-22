@@ -1,7 +1,35 @@
 //! Stable process boundary to the tested C++ Open Screen implementation.
 use crate::{config::Quality, discovery::Receiver};
 use anyhow::Result;
+use caster_core::adapters::TransportBackend;
 use std::{net::IpAddr, path::Path, process::Command};
+
+pub struct OpenScreenTransport;
+
+impl TransportBackend for OpenScreenTransport {
+    fn id(&self) -> &'static str {
+        "openscreen-cast"
+    }
+
+    fn supports(&self, receiver: &Receiver) -> bool {
+        receiver.port > 0 && receiver.host.parse::<IpAddr>().is_ok()
+    }
+
+    fn validate_quality(&self, quality: Quality) -> caster_core::adapters::AdapterResult<()> {
+        if quality.width <= 1920
+            && quality.height <= 1080
+            && (1..=30).contains(&quality.fps)
+            && (1_000_000..=8_000_000).contains(&quality.bitrate)
+        {
+            Ok(())
+        } else {
+            Err(caster_core::adapters::AdapterError::new(
+                "transport.quality",
+                "Google Cast v1 supports up to 1920x1080 at 30 fps and 8 Mbps",
+            ))
+        }
+    }
+}
 
 pub fn command(
     binary: &Path,

@@ -1,9 +1,11 @@
 mod audio;
+mod backends;
 mod capture;
 mod config;
 mod discovery;
 mod session;
 mod storage;
+mod supervisor;
 mod transport;
 
 use anyhow::{Context, Result};
@@ -13,13 +15,15 @@ use serde_json::{Value, json};
 use std::{
     fs::OpenOptions,
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
-    process::{Command, ExitCode},
+    process::ExitCode,
 };
 
-const UNIT: &str = caster_core::constants::SYSTEMD_UNIT;
 #[derive(Parser)]
 #[command(version, about = "Native Google Cast mirroring for Omarchy")]
 struct Cli {
+    /// Emit the stable versioned machine-readable envelope.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     action: Action,
 }
@@ -46,21 +50,42 @@ enum Action {
     Worker,
     #[command(hide = true)]
     Recover,
+    #[command(hide = true)]
+    CaptureWindow {
+        #[arg(long)]
+        address: String,
+        #[arg(long)]
+        width: u32,
+        #[arg(long)]
+        height: u32,
+        #[arg(long)]
+        fps: u32,
+    },
 }
-fn active(unit: &str) -> bool {
-    Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", unit])
-        .status()
-        .is_ok_and(|s| s.success())
+
+impl Action {
+    const fn name(&self) -> &'static str {
+        match self {
+            Self::Devices => "devices",
+            Self::Sources => "sources",
+            Self::Status => "status",
+            Self::Stop => "stop",
+            Self::Doctor => "doctor",
+            Self::Start { .. } => "start",
+            Self::Worker => "worker",
+            Self::Recover => "recover",
+            Self::CaptureWindow { .. } => "capture-window",
+        }
+    }
 }
 fn status() -> Result<session::Status> {
-    let path = storage::directory("runtime")?.join("status.json");
+    let path = storage::directory(storage::Directory::Runtime)?.join("status.json");
     let mut state: session::Status = if path.exists() {
         storage::read(&path)?
     } else {
         session::Status::default()
     };
-    if !active(UNIT)
+    if !supervisor::active()
         && matches!(
             state.state,
             SessionState::Connecting | SessionState::Negotiating | SessionState::Streaming
@@ -72,7 +97,7 @@ fn status() -> Result<session::Status> {
     Ok(state)
 }
 fn run(action: Action) -> Result<Value> {
-    let root = storage::directory("runtime")?;
+    let root = storage::directory(storage::Directory::Runtime)?;
     match action {
         Action::Devices => {
             let result = discovery::receivers()?;
@@ -85,9 +110,16 @@ fn run(action: Action) -> Result<Value> {
             Ok(json!(result))
         }
         Action::Status => Ok(json!(status()?)),
-        Action::Doctor => Ok(
-            json!({"binaries":config::binaries()?,"sources":capture::sources()?.len(),"controller":"Rust"}),
-        ),
+        Action::Doctor => Ok(json!({
+            "controller": "Rust",
+            "capabilities": backends::report(),
+            "config": config::load()?,
+            "paths": {
+                "config": storage::directory(storage::Directory::Config)?,
+                "runtime": storage::directory(storage::Directory::Runtime)?,
+                "state": storage::directory(storage::Directory::State)?,
+            }
+        })),
         Action::Recover => {
             audio::recover()?;
             Ok(json!({}))
@@ -108,11 +140,21 @@ fn run(action: Action) -> Result<Value> {
                 "Cannot lock session control"
             );
             if matches!(action, Action::Stop) {
-                let _ = Command::new("systemctl")
-                    .args(["--user", "stop", UNIT])
-                    .output()?;
+                if supervisor::active() {
+                    let mut stopping = status()?;
+                    stopping.state = SessionState::Stopping;
+                    stopping.detail = "Stopping cast and restoring audio".into();
+                    storage::write(&root.join("status.json"), &stopping)?;
+                }
+                supervisor::stop()?;
                 audio::recover()?;
-                return Ok(json!(status()?));
+                let idle = session::Status {
+                    state: SessionState::Idle,
+                    detail: "Stopped; audio routing restored".into(),
+                    ..session::Status::default()
+                };
+                storage::write(&root.join("status.json"), &idle)?;
+                return Ok(json!(idle));
             }
             let Action::Start {
                 device,
@@ -125,8 +167,15 @@ fn run(action: Action) -> Result<Value> {
                 unreachable!()
             };
             anyhow::ensure!(
-                !active(UNIT) && !active("fluxcast-live.service"),
+                !supervisor::active(),
                 "Another native cast is active; stop it first"
+            );
+            anyhow::ensure!(
+                !std::process::Command::new("systemctl")
+                    .args(["--user", "is-active", "--quiet", "fluxcast-live.service"])
+                    .status()
+                    .is_ok_and(|status| status.success()),
+                "FluxCast is active; stop it first"
             );
             let receivers: Vec<discovery::Receiver> =
                 storage::read(&root.join("devices.json")).context("Refresh receivers first")?;
@@ -150,6 +199,7 @@ fn run(action: Action) -> Result<Value> {
             };
             session::validate_audio(&request)?;
             config::binaries()?;
+            config::remember(&request)?;
             audio::recover()?;
             storage::write(&root.join("request.json"), &request)?;
             storage::write(
@@ -160,49 +210,109 @@ fn run(action: Action) -> Result<Value> {
                     ..session::Status::default()
                 },
             )?;
-            let exe = std::env::current_exe()?;
-            let path = exe.to_str().context("Executable path is not UTF-8")?;
-            anyhow::ensure!(
-                !path.contains(['\n', '\r', '%', '"', '\\']),
-                "Unsupported executable path"
-            );
-            let cleanup = format!("--property=ExecStopPost=\"{path}\" recover");
-            let result = Command::new("systemd-run")
-                .args([
-                    "--user",
-                    "--unit=caster-session",
-                    "--collect",
-                    "--property=TimeoutStopSec=15",
-                    "--property=KillMode=mixed",
-                    "--property=UMask=0077",
-                    &cleanup,
-                    path,
-                    "worker",
-                ])
-                .output()?;
-            anyhow::ensure!(
-                result.status.success(),
-                "Cannot start service: {}",
-                String::from_utf8_lossy(&result.stderr)
-            );
+            supervisor::start(&std::env::current_exe()?)?;
             Ok(json!(status()?))
         }
     }
 }
+fn human_output(command: &str, result: &Value) -> String {
+    match command {
+        "devices" => result
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| {
+                        format!(
+                            "{}\t{}\t{}:{}",
+                            row["name"].as_str().unwrap_or("Unknown receiver"),
+                            row["model"].as_str().unwrap_or("Unknown model"),
+                            row["host"].as_str().unwrap_or("?"),
+                            row["port"].as_u64().unwrap_or(0)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_else(|| "No receivers found".into()),
+        "sources" => result
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| {
+                        format!(
+                            "{}\t{}",
+                            row["kind"].as_str().unwrap_or("source"),
+                            row["label"].as_str().unwrap_or("Unknown source")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_else(|| "No sources found".into()),
+        "status" | "start" | "stop" => format!(
+            "{} — {}",
+            result["state"].as_str().unwrap_or("unknown"),
+            result["detail"].as_str().unwrap_or("")
+        ),
+        "doctor" => serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string()),
+        _ => "Done".into(),
+    }
+}
+
 fn main() -> ExitCode {
-    match run(Cli::parse().action) {
+    let cli = Cli::parse();
+    let json_output = cli.json;
+    let action = cli.action;
+    if let Action::CaptureWindow {
+        address,
+        width,
+        height,
+        fps,
+    } = action
+    {
+        let result = caster_capture_hyprland::stream_window(
+            &address,
+            caster_core::Quality {
+                width,
+                height,
+                fps,
+                bitrate: 0,
+            },
+        );
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let command = action.name();
+    match run(action) {
         Ok(result) => {
-            println!(
-                "{}",
-                json!({"api":caster_core::constants::API_VERSION,"ok":true,"result":result})
-            );
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&caster_core::api::Response::success(result)).unwrap()
+                );
+            } else {
+                println!("{}", human_output(command, &result));
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
-            println!(
-                "{}",
-                json!({"api":caster_core::constants::API_VERSION,"ok":false,"error":format!("{error:#}")})
-            );
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&caster_core::api::Response::<Value>::error(
+                        "command_failed",
+                        format!("{error:#}")
+                    ))
+                    .unwrap()
+                );
+            } else {
+                eprintln!("Caster: {error:#}");
+            }
             ExitCode::FAILURE
         }
     }

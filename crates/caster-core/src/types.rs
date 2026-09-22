@@ -247,6 +247,31 @@ pub struct Capabilities {
     pub supervisor: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BackendKind {
+    ReceiverDiscovery,
+    Capture,
+    Audio,
+    Transport,
+    Supervisor,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct BackendInfo {
+    pub id: String,
+    pub kind: BackendKind,
+    pub compiled: bool,
+    pub available: bool,
+    pub detail: String,
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CapabilityReport {
+    pub backends: Vec<BackendInfo>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

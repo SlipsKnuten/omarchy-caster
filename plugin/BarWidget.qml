@@ -1,162 +1,389 @@
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Controls as QQC
 import Quickshell
-import Quickshell.Io
-import qs.Ui
 import qs.Commons
+import qs.Ui
+import "Model.js" as Model
 
-BarWidget {
+Panel {
   id: root
-  moduleName: "slipsknuten.caster"
-  implicitWidth: 36
-  implicitHeight: barSize
-  property bool opened: false
-  property var receivers: []
-  property var sources: []
-  property var session: ({state: "idle", detail: "Ready"})
-  property string error: ""
-  readonly property string executable: "caster"
-  readonly property bool active: session.state === "streaming" || session.state === "connecting"
-  readonly property color fg: bar ? bar.foreground : "#eeeeee"
-  readonly property var selectedSource: sources[sourcePicker.currentIndex] || null
-  readonly property bool windowMode: root.active ? root.session.source_kind === "window" : selectedSource !== null && selectedSource.kind === "window"
-  function close() { opened = false }
-  function open() { opened = true }
-  function toggle() { opened = !opened }
-  function decode(text) {
-    try {
-      var value = JSON.parse(text)
-      if (value.api !== 1) throw new Error("Controller API mismatch")
-      if (!value.ok) throw new Error(value.error || "Command failed")
-      return value.result
-    } catch (e) { root.error = String(e); return null }
-  }
-  function refresh() {
-    if (!deviceProcess.running) deviceProcess.running = true
-    if (!sourceProcess.running) sourceProcess.running = true
-  }
-  function action(args) {
-    if (actionProcess.running) return
-    root.error = ""
-    actionProcess.command = [root.executable].concat(args)
-    actionProcess.running = true
-  }
-  onOpenedChanged: if (opened && !active) refresh()
 
-  Text {
-    anchors.centerIn: parent
-    text: "󰄘"
-    textFormat: Text.PlainText
-    color: root.active ? Color.accent : root.fg
-    font.family: root.bar ? root.bar.fontFamily : "monospace"
-    font.pixelSize: 20
-  }
-  MouseArea {
-    anchors.fill: parent
-    cursorShape: Qt.PointingHandCursor
-    onClicked: root.toggle()
-  }
-  PopupCard {
-    id: popup
-    anchorItem: root
-    bar: root.bar
-    owner: root
-    open: root.opened
-    contentWidth: popup.fittedContentWidth(440)
-    contentHeight: popup.fittedContentHeight(content.implicitHeight)
-    Column {
-      id: content
-      width: parent.width
-      spacing: 12
-      Text { text: "Caster"; textFormat: Text.PlainText; color: root.fg; font.bold: true; font.pixelSize: 18 }
-      Text { text: "Receiver"; color: root.fg }
-      ComboBox {
-        id: receiverPicker
-        visible: !root.active
-        width: parent.width
-        model: root.receivers
-        textRole: "name"
-        enabled: !root.active && !actionProcess.running
-        contentItem: Text { text: receiverPicker.displayText; textFormat: Text.PlainText; elide: Text.ElideRight; color: root.fg; verticalAlignment: Text.AlignVCenter; leftPadding: 8 }
-      }
-      Text { visible: root.active; width: parent.width; text: root.session.device || "Connecting…"; textFormat: Text.PlainText; wrapMode: Text.WordWrap; color: root.fg }
-      Text { text: "Screen or application window"; color: root.fg }
-      ComboBox {
-        id: sourcePicker
-        visible: !root.active
-        width: parent.width
-        model: root.sources
-        textRole: "label"
-        enabled: !root.active && !actionProcess.running
-        contentItem: Text { text: sourcePicker.displayText; textFormat: Text.PlainText; elide: Text.ElideRight; color: root.fg; verticalAlignment: Text.AlignVCenter; leftPadding: 8 }
-        onCurrentIndexChanged: audioCheck.checked = root.windowMode
-      }
-      Text { visible: root.active; width: parent.width; text: root.session.source || "Preparing source…"; textFormat: Text.PlainText; wrapMode: Text.WordWrap; color: root.fg }
-      CheckBox {
-        id: audioCheck
-        visible: !root.active
-        text: root.windowMode ? "Application audio → TV only" : "Share all system audio"
-        enabled: !root.active && !actionProcess.running
-      }
-      Text {
-        width: parent.width
-        text: root.windowMode ? "Only the selected window is captured. Audio is application-wide: browser tabs may share audio. Unmatched streams stay local." : "The entire selected screen is shared, including notifications. System audio is optional and may also play locally."
-        textFormat: Text.PlainText
-        wrapMode: Text.WordWrap
-        color: root.fg
-        opacity: 0.75
-        font.pixelSize: 12
-      }
-      Text { width: parent.width; text: "1080p · 30 fps · Original proportions"; color: root.fg; font.pixelSize: 12 }
-      Row {
-        spacing: 10
-        Button {
-          text: root.active ? "Stop casting" : "Start casting"
-          enabled: !actionProcess.running && (root.active || (receiverPicker.currentIndex >= 0 && sourcePicker.currentIndex >= 0))
-          onClicked: {
-            if (root.active) root.action(["stop"])
-            else root.action(["start", "--device", root.receivers[receiverPicker.currentIndex].id,
-                              "--source", root.selectedSource.id, "--audio",
-                              audioCheck.checked ? (root.windowMode ? "application" : "system") : "off"])
-          }
-        }
-        Button { text: deviceProcess.running ? "Scanning…" : "Refresh"; enabled: !root.active && !deviceProcess.running; onClicked: root.refresh() }
-      }
-      Text {
-        width: parent.width
-        text: root.error || ((root.session.state || "idle") + " · " + (root.session.detail || ""))
-        textFormat: Text.PlainText
-        wrapMode: Text.WordWrap
-        color: root.error || root.session.state === "error" ? "#ff8888" : root.fg
-      }
-      Text {
-        width: parent.width
-        visible: root.active && !!root.session.audio_detail
-        text: root.session.audio_detail || ""
-        textFormat: Text.PlainText
-        wrapMode: Text.WordWrap
-        color: root.fg
+  moduleName: "slipsknuten.caster"
+  ipcTarget: "slipsknuten.caster"
+
+  property string selectedReceiverId: ""
+  property string selectedSourceId: ""
+  property string sourceKind: "window"
+  property bool audioEnabled: false
+  property bool advancedOpen: false
+  property string quality: "auto"
+  property string bitrate: "auto"
+
+  readonly property bool active: Model.isActive(caster.session.state)
+  readonly property var visibleSources: Model.byKind(caster.sources, sourceKind)
+  readonly property var selectedReceiver: Model.findById(caster.receivers, selectedReceiverId)
+  readonly property var selectedSource: Model.findById(caster.sources, selectedSourceId)
+  readonly property color foreground: bar ? bar.foreground : Color.popups.text
+  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color dim: Qt.darker(foreground, 1.5)
+  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+
+  function synchronizeSelections() {
+    selectedReceiverId = Model.firstId(caster.receivers, selectedReceiverId)
+    var available = Model.byKind(caster.sources, sourceKind)
+    selectedSourceId = Model.firstId(available, selectedSourceId)
+    if (available.length === 0) {
+      var alternative = sourceKind === "window" ? "screen" : "window"
+      var other = Model.byKind(caster.sources, alternative)
+      if (other.length > 0) {
+        sourceKind = alternative
+        selectedSourceId = Model.firstId(other, "")
       }
     }
   }
-  Timer { interval: 1000; running: true; repeat: true; triggeredOnStart: true; onTriggered: if (!statusProcess.running) statusProcess.running = true }
-  Process {
-    id: statusProcess
-    command: [root.executable, "status"]
-    stdout: StdioCollector { onStreamFinished: { var value = root.decode(text); if (value) root.session = value } }
+
+  function selectKind(kind) {
+    sourceKind = kind
+    selectedSourceId = Model.firstId(Model.byKind(caster.sources, kind), "")
+    audioEnabled = false
   }
-  Process {
-    id: deviceProcess
-    command: [root.executable, "devices"]
-    stdout: StdioCollector { onStreamFinished: { var value = root.decode(text); if (value) root.receivers = value } }
+
+  function beginCast() {
+    var audio = audioEnabled ? (sourceKind === "window" ? "application" : "system") : "off"
+    caster.start(selectedReceiver, selectedSource, audio, quality, bitrate)
   }
-  Process {
-    id: sourceProcess
-    command: [root.executable, "sources"]
-    stdout: StdioCollector { onStreamFinished: { var value = root.decode(text); if (value) root.sources = value } }
+
+  function applyPreferences() {
+    var preferences = caster.preferences || ({})
+    if (preferences.receiver_id) selectedReceiverId = preferences.receiver_id
+    if (preferences.source_kind === "window" || preferences.source_kind === "screen")
+      sourceKind = preferences.source_kind
+    audioEnabled = preferences.audio !== undefined && preferences.audio !== "off"
+    if (preferences.quality) quality = preferences.quality
+    if (preferences.bitrate) bitrate = preferences.bitrate
+    synchronizeSelections()
   }
-  Process {
-    id: actionProcess
-    stdout: StdioCollector { onStreamFinished: { var value = root.decode(text); if (value) root.session = value } }
+
+  implicitWidth: barButton.implicitWidth
+  implicitHeight: barButton.implicitHeight
+
+  onOpenedChanged: if (opened) {
+    caster.refresh()
+    caster.refreshStatus()
+  }
+
+  Service { id: caster }
+
+  Connections {
+    target: caster
+    function onReceiversChanged() { root.synchronizeSelections() }
+    function onSourcesChanged() { root.synchronizeSelections() }
+    function onPreferencesChanged() { root.applyPreferences() }
+  }
+
+  BarIconButton {
+    id: barButton
+    anchors.fill: parent
+    bar: root.bar
+    text: "󰄘"
+    active: root.active
+    tooltipText: root.active ? "Casting to " + (caster.session.device || "receiver") : "Caster"
+    onClicked: root.toggle()
+    onRightClicked: caster.refresh()
+  }
+
+  KeyboardPanel {
+    id: panel
+    anchorItem: barButton
+    owner: root
+    bar: root.bar
+    open: root.opened
+    focusTarget: root.active ? stopButton : castButton
+    contentWidth: panel.fittedContentWidth(Style.space(420))
+    contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(680))
+
+    Shortcut {
+      sequence: "Escape"
+      enabled: root.opened
+      onActivated: root.close()
+    }
+
+    Flickable {
+      id: scroller
+      anchors.fill: parent
+      contentWidth: width
+      contentHeight: content.implicitHeight
+      clip: true
+      boundsBehavior: Flickable.StopAtBounds
+      flickableDirection: Flickable.VerticalFlick
+      interactive: contentHeight > height
+      QQC.ScrollBar.vertical: QQC.ScrollBar { policy: QQC.ScrollBar.AsNeeded }
+
+      Column {
+        id: content
+        width: scroller.width
+        spacing: Style.space(12)
+
+        PanelHero {
+          width: parent.width
+          title: root.active ? (caster.session.device || "Caster") : "Caster"
+          meta: Model.stageLabel(caster.session.state)
+          detail: root.active ? (caster.session.resolved_quality || "LIVE") : "CAST"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          iconComponent: Component {
+            Text {
+              text: root.active ? "󰄙" : "󰄘"
+              textFormat: Text.PlainText
+              color: root.active ? Color.accent : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.display
+            }
+          }
+        }
+
+        Text {
+          visible: caster.error !== "" || caster.session.state === "error"
+          width: parent.width
+          text: caster.error || caster.session.detail
+          textFormat: Text.PlainText
+          wrapMode: Text.WordWrap
+          color: root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        Column {
+          visible: root.active
+          width: parent.width
+          spacing: Style.space(10)
+
+          PanelSectionHeader {
+            text: "NOW CASTING"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          CastChoiceRow {
+            width: parent.width
+            title: caster.session.source || "Preparing source…"
+            subtitle: caster.session.audio_detail || "Audio off"
+            leadingIcon: caster.session.source_kind === "window" ? "󰖲" : "󰍹"
+            selected: true
+            busy: true
+          }
+
+          Text {
+            width: parent.width
+            text: caster.session.detail || "Streaming"
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Button {
+            id: stopButton
+            width: parent.width
+            text: caster.session.state === "stopping" ? "Stopping…" : "Stop casting"
+            iconText: "󰓛"
+            foreground: root.urgent
+            bordered: true
+            focusable: true
+            enabled: !caster.busy && caster.session.state !== "stopping"
+            onClicked: caster.stop()
+          }
+        }
+
+        Column {
+          visible: !root.active
+          width: parent.width
+          spacing: Style.space(12)
+
+          PanelSectionHeader {
+            text: "CHOOSE A RECEIVER"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Text {
+            visible: caster.receivers.length === 0
+            width: parent.width
+            text: caster.scanning ? "Looking for Google Cast devices…" : "No receivers found on this network."
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            horizontalAlignment: Text.AlignHCenter
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Repeater {
+            model: caster.receivers
+            CastChoiceRow {
+              required property var modelData
+              width: parent.width
+              title: modelData.name
+              subtitle: modelData.model
+              leadingIcon: "󰒋"
+              selected: root.selectedReceiverId === modelData.id
+              busy: caster.busy
+              onChosen: root.selectedReceiverId = modelData.id
+            }
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.spacing.controlGap
+
+            Button {
+              width: (parent.width - parent.spacing) / 2
+              text: "Applications"
+              iconText: "󰖲"
+              selected: root.sourceKind === "window"
+              bordered: true
+              focusable: true
+              onClicked: root.selectKind("window")
+            }
+            Button {
+              width: (parent.width - parent.spacing) / 2
+              text: "Screens"
+              iconText: "󰍹"
+              selected: root.sourceKind === "screen"
+              bordered: true
+              focusable: true
+              onClicked: root.selectKind("screen")
+            }
+          }
+
+          Text {
+            width: parent.width
+            text: Model.sourceDescription(root.sourceKind)
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Text {
+            visible: root.visibleSources.length === 0
+            width: parent.width
+            text: caster.scanning ? "Reading available sources…" : "No shareable " + (root.sourceKind === "window" ? "applications" : "screens") + " found."
+            textFormat: Text.PlainText
+            horizontalAlignment: Text.AlignHCenter
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Repeater {
+            model: root.visibleSources
+            CastChoiceRow {
+              required property var modelData
+              width: parent.width
+              title: modelData.label
+              subtitle: root.sourceKind === "window" ? modelData.app : "Entire display"
+              leadingIcon: root.sourceKind === "window" ? "󰖲" : "󰍹"
+              selected: root.selectedSourceId === modelData.id
+              busy: caster.busy
+              onChosen: root.selectedSourceId = modelData.id
+            }
+          }
+
+          Toggle {
+            width: parent.width
+            label: root.sourceKind === "window" ? "Application audio" : "System audio"
+            description: root.sourceKind === "window"
+              ? "Send matching app audio to the TV; other apps stay local."
+              : "Send the desktop mix to the TV."
+            checked: root.audioEnabled
+            enabled: !caster.busy && root.selectedSource !== null
+            onClicked: root.audioEnabled = !root.audioEnabled
+          }
+
+          Button {
+            width: parent.width
+            text: root.advancedOpen ? "Hide advanced settings" : "Advanced settings"
+            iconText: root.advancedOpen ? "󰅃" : "󰅀"
+            leftAlign: true
+            focusable: true
+            onClicked: root.advancedOpen = !root.advancedOpen
+          }
+
+          Column {
+            visible: root.advancedOpen
+            width: parent.width
+            spacing: Style.space(10)
+
+            Dropdown {
+              width: parent.width
+              label: "Quality"
+              value: root.quality
+              options: Model.qualityOptions()
+              foreground: root.foreground
+              onChanged: function(value) { root.quality = value }
+            }
+            Dropdown {
+              width: parent.width
+              label: "Video bitrate"
+              value: root.bitrate
+              options: Model.bitrateOptions()
+              foreground: root.foreground
+              onChanged: function(value) { root.bitrate = value }
+            }
+          }
+
+          PanelSeparator {
+            foreground: root.foreground
+          }
+
+          Button {
+            id: castButton
+            width: parent.width
+            text: caster.busy ? "Starting…" : "Cast now"
+            iconText: "󰄘"
+            active: root.selectedReceiver !== null && root.selectedSource !== null
+            bordered: true
+            focusable: true
+            enabled: !caster.busy && root.selectedReceiver !== null && root.selectedSource !== null
+            onClicked: root.beginCast()
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.spacing.controlGap
+            Button {
+              width: (parent.width - parent.spacing) / 2
+              text: caster.scanning ? "Scanning…" : "Refresh"
+              iconText: "󰑐"
+              focusable: true
+              enabled: !caster.scanning && !caster.busy
+              onClicked: caster.refresh()
+            }
+            Button {
+              width: (parent.width - parent.spacing) / 2
+              text: "Diagnostics"
+              iconText: "󰒓"
+              focusable: true
+              enabled: !caster.busy
+              onClicked: caster.runDoctor()
+            }
+          }
+
+          Text {
+            visible: caster.diagnostics !== ""
+            width: parent.width
+            text: caster.diagnostics
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+        }
+      }
+    }
   }
 }

@@ -7,6 +7,20 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub struct GoogleCastDiscovery;
+
+impl caster_core::adapters::ReceiverDiscovery for GoogleCastDiscovery {
+    fn id(&self) -> &'static str {
+        "google-cast-mdns"
+    }
+
+    fn discover(&self) -> caster_core::adapters::AdapterResult<Vec<Receiver>> {
+        receivers().map_err(|error| {
+            caster_core::adapters::AdapterError::new("receiver.discovery", format!("{error:#}"))
+        })
+    }
+}
+
 const CAST_SERVICE: &str = "_googlecast._tcp.local.";
 pub fn receivers() -> Result<Vec<Receiver>> {
     let daemon = ServiceDaemon::new()?;

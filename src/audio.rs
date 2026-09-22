@@ -5,6 +5,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 pub use caster_core::AudioMode as Mode;
+use caster_core::{SourceKind, adapters::AudioBackend};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -12,6 +13,28 @@ use std::{
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+pub struct PulseAudioAdapter;
+
+impl AudioBackend for PulseAudioAdapter {
+    fn id(&self) -> &'static str {
+        "pulse-compatible"
+    }
+
+    fn supports(&self, source: &Source, mode: Mode) -> bool {
+        match mode {
+            Mode::Off => true,
+            Mode::Application => source.kind == SourceKind::Window,
+            Mode::System => source.kind == SourceKind::Screen,
+        }
+    }
+
+    fn recover(&self) -> caster_core::adapters::AdapterResult<()> {
+        recover().map_err(|error| {
+            caster_core::adapters::AdapterError::new("audio.recovery", format!("{error:#}"))
+        })
+    }
+}
 
 #[derive(Deserialize, Serialize)]
 struct Route {
@@ -73,7 +96,7 @@ pub fn default_monitor() -> Result<String> {
     Ok(format!("{}.monitor", pactl(&["get-default-sink"])?))
 }
 pub fn recover() -> Result<()> {
-    let path = storage::directory("runtime")?.join("audio.json");
+    let path = storage::directory(storage::Directory::Runtime)?.join("audio.json");
     if !path.exists() {
         return Ok(());
     }
@@ -133,7 +156,10 @@ impl AppAudio {
             name: format!("omacast_dev_{}_{nonce}", std::process::id()),
             routes: BTreeMap::new(),
         };
-        storage::write(&storage::directory("runtime")?.join("audio.json"), &state)?;
+        storage::write(
+            &storage::directory(storage::Directory::Runtime)?.join("audio.json"),
+            &state,
+        )?;
         pactl(&[
             "load-module",
             "module-null-sink",
@@ -188,7 +214,7 @@ impl AppAudio {
                 },
             );
             storage::write(
-                &storage::directory("runtime")?.join("audio.json"),
+                &storage::directory(storage::Directory::Runtime)?.join("audio.json"),
                 &self.state,
             )?;
             pactl(&["move-sink-input", &index.to_string(), &self.state.name])?;
@@ -251,7 +277,9 @@ mod tests {
                 }
             }
         }
-        let state = storage::directory("runtime").unwrap().join("audio.json");
+        let state = storage::directory(storage::Directory::Runtime)
+            .unwrap()
+            .join("audio.json");
         assert!(
             !state.exists(),
             "Do not run while application audio is being cast"

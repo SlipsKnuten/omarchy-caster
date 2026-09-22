@@ -6,7 +6,7 @@ use serde::Serialize;
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum Response<T: Serialize> {
-    Success { api: u32, ok: bool, data: T },
+    Success { api: u32, ok: bool, result: T },
     Error { api: u32, ok: bool, error: ApiError },
 }
 
@@ -17,11 +17,11 @@ pub struct ApiError {
 }
 
 impl<T: Serialize> Response<T> {
-    pub fn success(data: T) -> Self {
+    pub fn success(result: T) -> Self {
         Self::Success {
             api: API_VERSION,
             ok: true,
-            data,
+            result,
         }
     }
 
@@ -34,5 +34,21 @@ impl<T: Serialize> Response<T> {
                 message: message.into(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn envelopes_have_stable_keys() {
+        let success = serde_json::to_value(Response::success(42)).unwrap();
+        assert_eq!(success["api"], API_VERSION);
+        assert_eq!(success["ok"], true);
+        assert_eq!(success["result"], 42);
+        let error = serde_json::to_value(Response::<()>::error("test", "message")).unwrap();
+        assert_eq!(error["error"]["code"], "test");
+        assert_eq!(error["error"]["message"], "message");
     }
 }

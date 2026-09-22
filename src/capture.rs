@@ -1,105 +1,35 @@
 //! Compositor-specific capture adapter. Surface capture never falls back to a screen crop.
 use crate::config::Quality;
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 pub use caster_core::{Source, SourceKind as Kind};
-use std::{fs, path::Path, process::Command};
+use std::process::Command;
+
 pub fn json_command(program: &str, args: &[&str]) -> Result<serde_json::Value> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .with_context(|| format!("Cannot run {program}"))?;
-    anyhow::ensure!(
-        output.status.success(),
-        "{program}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(serde_json::from_slice(&output.stdout)?)
+    caster_capture_hyprland::json_command(program, args)
 }
 pub fn process_identity(pid: u32) -> Option<String> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, fields) = stat.rsplit_once(')')?;
-    Some(format!("{}:{}", pid, fields.split_whitespace().nth(19)?))
+    caster_capture_hyprland::process_identity(pid)
 }
 pub fn sources() -> Result<Vec<Source>> {
-    let monitors = json_command("hyprctl", &["monitors", "-j"])?;
-    let windows = json_command("hyprctl", &["clients", "-j"])?;
-    let mut result = Vec::new();
-    for row in monitors.as_array().context("Malformed monitor list")? {
-        let name = row["name"]
-            .as_str()
-            .context("Monitor has no name")?
-            .to_owned();
-        result.push(Source {
-            id: format!("screen:{name}"),
-            kind: Kind::Screen,
-            label: format!("Screen · {name}"),
-            name,
-            pid: 0,
-            identity: String::new(),
-            app: String::new(),
-        });
-    }
-    for row in windows.as_array().context("Malformed window list")? {
-        if row["mapped"].as_bool() == Some(false) {
-            continue;
-        }
-        let Some(pid) = row["pid"].as_u64().and_then(|p| u32::try_from(p).ok()) else {
-            continue;
-        };
-        let Some(identity) = process_identity(pid) else {
-            continue;
-        };
-        let name = row["address"]
-            .as_str()
-            .context("Window has no address")?
-            .to_owned();
-        let app = row["class"].as_str().unwrap_or("Unknown").to_owned();
-        let title = row["title"].as_str().unwrap_or("");
-        result.push(Source {
-            id: format!("window:{name}"),
-            kind: Kind::Window,
-            label: format!("{app} · {title}"),
-            name,
-            pid,
-            identity,
-            app,
-        });
-    }
-    Ok(result)
-}
-fn handle(address: &str) -> Result<u32> {
-    Ok(u64::from_str_radix(address.trim_start_matches("0x"), 16)? as u32)
+    caster_capture_hyprland::enumerate_sources()
 }
 pub fn validate(selected: &Source) -> Result<()> {
-    let current = sources()?;
-    anyhow::ensure!(
-        current
-            .iter()
-            .any(|s| s.id == selected.id && s.identity == selected.identity),
-        "Selected source closed or changed; choose it again"
-    );
-    if selected.kind == Kind::Window {
-        let id = handle(&selected.name)?;
-        anyhow::ensure!(
-            current
-                .iter()
-                .filter(|s| s.kind == Kind::Window && handle(&s.name).ok() == Some(id))
-                .count()
-                == 1,
-            "Ambiguous window handle; capture refused"
-        );
-    }
-    Ok(())
+    caster_capture_hyprland::validate_source(selected)
 }
-pub fn command(source: &Source, q: Quality, helper: &Path) -> Result<Command> {
+pub fn command(source: &Source, q: Quality) -> Result<Command> {
     match source.kind {
         Kind::Window => {
-            handle(&source.name)?;
-            let mut cmd = Command::new(helper);
+            let mut cmd = Command::new(std::env::current_exe()?);
             cmd.args([
+                "capture-window".into(),
+                "--address".into(),
                 source.name.clone(),
+                "--width".into(),
                 q.width.to_string(),
+                "--height".into(),
                 q.height.to_string(),
+                "--fps".into(),
+                q.fps.to_string(),
             ]);
             Ok(cmd)
         }
@@ -159,10 +89,23 @@ mod tests {
             identity: "1:2".into(),
             app: "app".into(),
         };
-        let cmd = command(&source, Quality::default(), Path::new("/window-helper")).unwrap();
-        assert_eq!(cmd.get_program(), "/window-helper");
+        let cmd = command(&source, Quality::default()).unwrap();
+        assert_eq!(cmd.get_program(), std::env::current_exe().unwrap());
         let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
-        assert_eq!(args, ["0x1234", "1920", "1080"]);
+        assert_eq!(
+            args,
+            [
+                "capture-window",
+                "--address",
+                "0x1234",
+                "--width",
+                "1920",
+                "--height",
+                "1080",
+                "--fps",
+                "30"
+            ]
+        );
     }
     #[test]
     fn monitor_name_is_not_shell_interpolated() {
@@ -175,7 +118,7 @@ mod tests {
             identity: String::new(),
             app: String::new(),
         };
-        let cmd = command(&source, Quality::default(), Path::new("/unused")).unwrap();
+        let cmd = command(&source, Quality::default()).unwrap();
         assert_eq!(cmd.get_args().last().unwrap(), "odd;name");
     }
 }
