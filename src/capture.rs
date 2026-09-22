@@ -1,25 +1,8 @@
 //! Compositor-specific capture adapter. Surface capture never falls back to a screen crop.
 use crate::config::Quality;
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+pub use caster_core::{Source, SourceKind as Kind};
 use std::{fs, path::Path, process::Command};
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Kind {
-    Screen,
-    Window,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Source {
-    pub id: String,
-    pub kind: Kind,
-    pub name: String,
-    pub label: String,
-    pub pid: u32,
-    pub identity: String,
-    pub app: String,
-}
 pub fn json_command(program: &str, args: &[&str]) -> Result<serde_json::Value> {
     let output = Command::new(program)
         .args(args)

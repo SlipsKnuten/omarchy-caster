@@ -13,12 +13,12 @@ submission are deliberately deferred.
 - [ ] Convert the source tree into a documented Rust workspace with narrow
   crates for core/domain logic, CLI, media, Hyprland capture, Pulse audio,
   Google Cast transport, and systemd supervision.
-- [ ] Initialize clean local Git history without publishing or pushing it.
+- [x] Initialize clean local Git history without publishing or pushing it.
 - [ ] Remove obsolete Python caches and, after parity verification, the C
   capture helper and Makefile.
 - [ ] Keep the current development plugin and FluxCast launcher available as
   rollback paths until final hardware acceptance.
-- [ ] Add `AGENTS.md`, a living `ARCHITECTURE.md`, numbered immutable ADRs,
+- [x] Add `AGENTS.md`, a living `ARCHITECTURE.md`, numbered immutable ADRs,
   `CONTRIBUTING.md`, `SECURITY.md`, a changelog, and a hardware evidence
   template.
 - [ ] Add formatting, lint, test, dependency/license, and plugin-validation CI
@@ -28,13 +28,13 @@ submission are deliberately deferred.
 
 - [ ] Replace stringly session/source/status values and untyped JSON parsing
   with domain enums and typed DTOs.
-- [ ] Define compile-time adapter traits for receiver discovery, capture,
+- [x] Define compile-time adapter traits for receiver discovery, capture,
   audio, transport, and session supervision.
 - [ ] Add a static feature-gated backend registry and typed capability report;
   do not add a runtime plugin ABI in v1.
 - [ ] Add declarative Google Cast receiver profiles keyed by stable model and
   capability data, never friendly names.
-- [ ] Keep only product-wide constants in a shared constants module; colocate
+- [x] Keep only product-wide constants in a shared constants module; colocate
   timeouts, protocol values, and defaults with their owners.
 - [ ] Use narrowly named XDG, process, atomic-storage, and serialization
   modules rather than generic `globals` or `utils` folders.
@@ -96,7 +96,7 @@ submission are deliberately deferred.
 
 ## 6. Omarchy GUI redesign
 
-- [ ] Move the manifest to repository root and validate the repository directly
+- [x] Move the manifest to repository root and validate the repository directly
   with `omarchy plugin validate`.
 - [ ] Replace the development `PopupCard` with Omarchy's native `Panel` and
   first-party panel primitives.

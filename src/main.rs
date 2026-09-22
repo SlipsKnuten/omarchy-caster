@@ -7,6 +7,7 @@ mod storage;
 mod transport;
 
 use anyhow::{Context, Result};
+use caster_core::{BitrateChoice, QualityPreset, SessionState};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::{
@@ -15,10 +16,9 @@ use std::{
     process::{Command, ExitCode},
 };
 
-const UNIT: &str = "omacast-dev.service";
-const API_VERSION: u32 = 1;
+const UNIT: &str = caster_core::constants::SYSTEMD_UNIT;
 #[derive(Parser)]
-#[command(version, about = "Experimental native Cast controller")]
+#[command(version, about = "Native Google Cast mirroring for Omarchy")]
 struct Cli {
     #[command(subcommand)]
     action: Action,
@@ -35,8 +35,12 @@ enum Action {
         device: String,
         #[arg(long)]
         source: String,
-        #[arg(long, value_enum, default_value = "off")]
+        #[arg(long, default_value = "off")]
         audio: audio::Mode,
+        #[arg(long, default_value = "auto")]
+        quality: QualityPreset,
+        #[arg(long, default_value = "auto")]
+        bitrate: BitrateChoice,
     },
     #[command(hide = true)]
     Worker,
@@ -56,8 +60,13 @@ fn status() -> Result<session::Status> {
     } else {
         session::Status::default()
     };
-    if !active(UNIT) && matches!(state.state.as_str(), "connecting" | "streaming") {
-        state.state = "error".into();
+    if !active(UNIT)
+        && matches!(
+            state.state,
+            SessionState::Connecting | SessionState::Negotiating | SessionState::Streaming
+        )
+    {
+        state.state = SessionState::Error;
         state.detail = "Session ended unexpectedly; start again to recover".into();
     }
     Ok(state)
@@ -109,6 +118,8 @@ fn run(action: Action) -> Result<Value> {
                 device,
                 source,
                 audio,
+                quality,
+                bitrate,
             } = action
             else {
                 unreachable!()
@@ -134,6 +145,8 @@ fn run(action: Action) -> Result<Value> {
                 receiver,
                 source,
                 audio,
+                quality,
+                bitrate,
             };
             session::validate_audio(&request)?;
             config::binaries()?;
@@ -142,7 +155,7 @@ fn run(action: Action) -> Result<Value> {
             storage::write(
                 &root.join("status.json"),
                 &session::Status {
-                    state: "connecting".into(),
+                    state: SessionState::Connecting,
                     detail: "Starting native Cast".into(),
                     ..session::Status::default()
                 },
@@ -157,7 +170,7 @@ fn run(action: Action) -> Result<Value> {
             let result = Command::new("systemd-run")
                 .args([
                     "--user",
-                    "--unit=omacast-dev",
+                    "--unit=caster-session",
                     "--collect",
                     "--property=TimeoutStopSec=15",
                     "--property=KillMode=mixed",
@@ -179,13 +192,16 @@ fn run(action: Action) -> Result<Value> {
 fn main() -> ExitCode {
     match run(Cli::parse().action) {
         Ok(result) => {
-            println!("{}", json!({"api":API_VERSION,"ok":true,"result":result}));
+            println!(
+                "{}",
+                json!({"api":caster_core::constants::API_VERSION,"ok":true,"result":result})
+            );
             ExitCode::SUCCESS
         }
         Err(error) => {
             println!(
                 "{}",
-                json!({"api":API_VERSION,"ok":false,"error":format!("{error:#}")})
+                json!({"api":caster_core::constants::API_VERSION,"ok":false,"error":format!("{error:#}")})
             );
             ExitCode::FAILURE
         }

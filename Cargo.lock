@@ -215,13 +215,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "omacast-dev"
+name = "omarchy-caster-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "libc",
  "mdns-sd",
+ "omarchy-caster-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "omarchy-caster-core"
+version = "0.1.0"
+dependencies = [
  "serde",
  "serde_json",
 ]

@@ -7,7 +7,7 @@ import qs.Commons
 
 BarWidget {
   id: root
-  moduleName: "pepw.native-cast-dev"
+  moduleName: "slipsknuten.caster"
   implicitWidth: 36
   implicitHeight: barSize
   property bool opened: false
@@ -15,7 +15,7 @@ BarWidget {
   property var sources: []
   property var session: ({state: "idle", detail: "Ready"})
   property string error: ""
-  readonly property string executable: Quickshell.env("HOME") + "/.local/bin/omacast-dev"
+  readonly property string executable: "caster"
   readonly property bool active: session.state === "streaming" || session.state === "connecting"
   readonly property color fg: bar ? bar.foreground : "#eeeeee"
   readonly property var selectedSource: sources[sourcePicker.currentIndex] || null
@@ -68,7 +68,7 @@ BarWidget {
       id: content
       width: parent.width
       spacing: 12
-      Text { text: "Native Cast · Development"; textFormat: Text.PlainText; color: root.fg; font.bold: true; font.pixelSize: 18 }
+      Text { text: "Caster"; textFormat: Text.PlainText; color: root.fg; font.bold: true; font.pixelSize: 18 }
       Text { text: "Receiver"; color: root.fg }
       ComboBox {
         id: receiverPicker

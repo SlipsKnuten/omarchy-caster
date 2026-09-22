@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "slipsknuten.caster",
+  "name": "Caster",
+  "version": "0.1.0",
+  "author": "SlipsKnuten",
+  "license": "GPL-3.0-only",
+  "description": "Native low-latency Google Cast mirroring for Omarchy",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "plugin/BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Caster",
+    "description": "Cast a selected application or screen to Google Cast",
+    "category": "Media",
+    "aliases": ["cast", "chromecast", "screen-share"],
+    "defaultSection": "right",
+    "allowMultiple": false
+  }
+}

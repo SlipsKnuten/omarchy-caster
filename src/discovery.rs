@@ -1,22 +1,13 @@
 //! Google Cast discovery, independent of UI and capture backend.
 use anyhow::Result;
+pub use caster_core::Receiver;
 use mdns_sd::{ServiceDaemon, ServiceEvent};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
 };
 
 const CAST_SERVICE: &str = "_googlecast._tcp.local.";
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Receiver {
-    pub id: String,
-    pub name: String,
-    pub host: String,
-    pub port: u16,
-    pub model: String,
-}
-
 pub fn receivers() -> Result<Vec<Receiver>> {
     let daemon = ServiceDaemon::new()?;
     let events = daemon.browse(CAST_SERVICE)?;

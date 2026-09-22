@@ -4,6 +4,7 @@ use crate::{
     storage,
 };
 use anyhow::{Context, Result};
+pub use caster_core::AudioMode as Mode;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -12,13 +13,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, clap::ValueEnum, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    Off,
-    Application,
-    System,
-}
 #[derive(Deserialize, Serialize)]
 struct Route {
     sink: String,

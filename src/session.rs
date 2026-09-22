@@ -1,13 +1,11 @@
 //! Supervised process graph; bounded stop, source lifetime checks and audio restoration.
 use crate::{
     audio::{self, Mode},
-    capture::{self, Source},
-    config::{self, Quality},
-    discovery::Receiver,
-    storage, transport,
+    capture, config, storage, transport,
 };
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use caster_core::{Quality, SessionState};
+pub use caster_core::{Request, Status};
 use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
@@ -29,46 +27,6 @@ extern "C" fn signal_stop(_: i32) {
     STOP.store(true, Ordering::Relaxed);
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Request {
-    pub receiver: Receiver,
-    pub source: Source,
-    pub audio: Mode,
-}
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Status {
-    pub state: String,
-    pub detail: String,
-    #[serde(default)]
-    pub device: String,
-    #[serde(default)]
-    pub source: String,
-    #[serde(default)]
-    pub source_id: String,
-    #[serde(default)]
-    pub device_id: String,
-    #[serde(default)]
-    pub source_kind: String,
-    #[serde(default)]
-    pub audio_detail: String,
-    #[serde(default)]
-    pub scheduled_playout: String,
-}
-impl Default for Status {
-    fn default() -> Self {
-        Self {
-            state: "idle".into(),
-            detail: "Ready".into(),
-            device: String::new(),
-            source: String::new(),
-            source_id: String::new(),
-            device_id: String::new(),
-            source_kind: String::new(),
-            audio_detail: String::new(),
-            scheduled_playout: String::new(),
-        }
-    }
-}
 fn save(status: &Status) -> Result<()> {
     storage::write(&storage::directory("runtime")?.join("status.json"), status)
 }
@@ -124,7 +82,7 @@ pub fn worker() -> Result<()> {
     }
     let spec: Request = storage::read(&storage::directory("runtime")?.join("request.json"))?;
     let state = Arc::new(Mutex::new(Status {
-        state: "connecting".into(),
+        state: SessionState::Connecting,
         detail: "Starting native Cast".into(),
         device: spec.receiver.name.clone(),
         source: spec.source.label.clone(),
@@ -143,20 +101,20 @@ pub fn worker() -> Result<()> {
     let restoration = audio::recover();
     let mut status = state.lock().unwrap();
     if let Err(error) = restoration {
-        status.state = "error".into();
+        status.state = SessionState::Error;
         status.detail = format!("Audio restoration needs attention: {error:#}");
         save(&status)?;
         return Err(error);
     }
     match result {
         Ok(()) => {
-            status.state = "idle".into();
+            status.state = SessionState::Idle;
             status.detail = "Stopped; audio routing restored".into();
             save(&status)?;
             Ok(())
         }
         Err(error) => {
-            status.state = "error".into();
+            status.state = SessionState::Error;
             status.detail = format!("{error:#}");
             save(&status)?;
             Err(error)
@@ -168,7 +126,7 @@ fn run(spec: &Request, state: Arc<Mutex<Status>>) -> Result<()> {
     audio::recover()?;
     capture::validate(&spec.source)?;
     let bins = config::binaries()?;
-    let quality = Quality::default();
+    let quality = Quality::resolve(spec.quality, spec.bitrate);
     let mut routing = if spec.audio == Mode::Application {
         Some(audio::AppAudio::new(spec.source.clone())?)
     } else {
@@ -245,7 +203,7 @@ fn run(spec: &Request, state: Arc<Mutex<Status>>) -> Result<()> {
             }
             anyhow::ensure!(
                 started.elapsed() < Duration::from_secs(30)
-                    || state.lock().unwrap().state == "streaming",
+                    || state.lock().unwrap().state == SessionState::Streaming,
                 "Receiver did not start streaming within 30 seconds"
             );
             thread::sleep(Duration::from_millis(500));
@@ -263,8 +221,11 @@ fn observe(stderr: std::process::ChildStderr, mut log: File, state: Arc<Mutex<St
             && !STOP.load(Ordering::Relaxed)
             && let Ok(mut status) = state.lock()
         {
-            status.state = "streaming".into();
-            status.detail = "1080p · 30 fps · Native Cast".into();
+            status.state = SessionState::Streaming;
+            if status.resolved_quality.is_empty() {
+                status.resolved_quality = "1080p30 · 6 Mbps".into();
+            }
+            status.detail = format!("{} · Native Cast", status.resolved_quality);
             status.scheduled_playout = line
                 .split_once("latency")
                 .map(|(_, s)| s.trim().to_owned())
@@ -291,6 +252,7 @@ fn healthy_video_stats(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use caster_core::{Receiver, Source};
     #[test]
     fn invalid_statistics_never_mark_a_stream_healthy() {
         assert!(!healthy_video_stats(
@@ -322,6 +284,8 @@ mod tests {
                 app: "app".into(),
             },
             audio,
+            quality: caster_core::QualityPreset::Auto,
+            bitrate: caster_core::BitrateChoice::Auto,
         }
     }
     #[test]
