@@ -27,6 +27,24 @@ carry capture timestamps yet, so screen casts may show a larger A/V offset.
 Hardware coverage and the acceptance checklist are in
 [docs/hardware-verification.md](docs/hardware-verification.md); items there
 that are unchecked have not been verified. Other receivers are untested.
+See [Known limitations](#known-limitations) before relying on it.
+
+## Known limitations
+
+- **Power and CPU.** Casting is CPU-heavy: the compositor copies every captured
+  frame and the sender encodes H.264 in software, which keeps more than two
+  cores busy and draws noticeably more power than idle. Prefer AC power. It has
+  not been measured in watts yet.
+- **Window capture frame rate depends on Hyprland.** The same window delivers
+  roughly half the frames per second when it is on the visible, focused
+  workspace than when it is on a hidden one (about 11 versus 24 fps in
+  testing). Caster's own processing is not the limit. If the picture is choppy,
+  move the casted window to another workspace. Details and numbers are in
+  [docs/performance.md](docs/performance.md).
+- **Screen casts have a looser A/V offset** because `wf-recorder` does not carry
+  capture timestamps yet.
+- **Receiver discovery can come back empty on the first scan.** Scan again.
+- Verified on one machine and two receivers; other hardware is untested.
 
 ## Requirements
 
