@@ -1,125 +1,123 @@
-# Native Cast — development working name
+# Caster
 
-Rust-controlled native Chromecast mirroring for Omarchy/Hyprland. This is a
-local prototype, not a published release. The final project name is pending:
-several existing projects already use OmaCast.
+Caster is an open-source, low-latency Google Cast mirroring app for Omarchy.
+It can share one Hyprland application surface or a complete output without
+opening Chrome. The project is a local release candidate and is not published
+or packaged yet.
 
-## Components
+## What works today
 
-- `src/`: Rust CLI, receiver discovery, configuration, session supervision,
-  source identity, audio routing, and native transport adapter.
-- `native/`: small C Hyprland surface-capture helper. Captures only the chosen
-  window, scales onto a 1080p canvas without stretching, and emits raw NUT video.
-- `plugin/`: QML Omarchy bar widget. Uses the same versioned JSON CLI as scripts.
+- Rust mDNS discovery for Google Cast receivers.
+- Privacy-preserving Hyprland window capture using toplevel-export; another
+  window covering the selected app is never captured.
+- Whole-output capture through the temporary `wf-recorder` compatibility path.
+- Rust FFmpeg bindings for window scaling, stable I420 letterboxing, video NUT
+  framing, and Pulse-compatible audio NUT framing.
+- Application-audio isolation through a private Pulse/PipeWire sink, plus
+  optional system audio for whole-screen sharing.
+- Patched Open Screen C++ transport with the native Cast Streaming receiver,
+  subsecond hardware-tested latency, and synchronized audio/video.
+- An on-demand systemd user worker and a native Omarchy panel.
 
-No Python runs in this implementation. Open Screen C++ handles H.264 encoding
-and native Cast Streaming; FFmpeg handles audio capture. Omarchy Quickshell owns
-the GUI. Rust is used for control and safety, not as a claim of lower latency
-by itself. End-to-end latency still requires a visual TV comparison.
+The installed development prototype and FluxCast remain rollback paths. The new
+Rust window pipeline has automated media verification but still needs an
+unlocked-session and TV-side acceptance pass before replacing that prototype.
 
-## Build and development setup
+## Architecture
+
+The Cargo workspace currently contains:
+
+- `omarchy-caster-core`: domain types, API envelopes, adapter traits, quality
+  policy, and declarative receiver profiles.
+- `omarchy-caster-capture-hyprland`: Hyprland surface capture, scaling, and
+  video NUT output.
+- `omarchy-caster-audio-pulse`: direct Pulse-compatible capture and audio NUT
+  output.
+- `omarchy-caster-cli` (`caster`): discovery, routing, session supervision,
+  configuration, and the CLI boundary.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md), [AGENTS.md](AGENTS.md), and the accepted
+decisions under [docs/adr](docs/adr). Progress and acceptance criteria live in
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+
+## Build and verify
+
+Required development libraries include Wayland, FFmpeg, and PulseAudio; runtime
+requirements include Hyprland, PipeWire-Pulse, systemd user services,
+`wf-recorder` for screen compatibility, and the patched Open Screen sender.
 
 ```sh
-make -C native
 cargo build --release --locked
-cargo test --locked
-cargo clippy --all-targets --locked -- -D warnings
+cargo fmt --all --check
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+omarchy plugin validate .
+qmllint -I /usr/share/omarchy/shell \
+  plugin/BarWidget.qml plugin/Service.qml plugin/CastChoiceRow.qml
 ```
 
-Dependencies: Rust, C compiler, make, wayland-scanner, Wayland and FFmpeg
-development libraries, wf-recorder, ffmpeg, pactl, Hyprland, user systemd,
-and the patched Open Screen sender from our preceding hardware-tested prototype.
-Window capture requires Hyprland's toplevel-export protocol.
+The live audio-routing test is intentionally ignored because it creates local
+test streams and changes their routing. Run it only when no cast is active:
 
-Configure `sender` and `window_capture` as absolute native executable paths in
-`~/.config/omacast-dev/config.json`. These machine-specific paths are deliberately
-outside the repository. Current development launch integration points to the
-local release binary; do not delete the checkout while using the widget.
+```sh
+cargo test live_routing -- --ignored --test-threads=1
+```
 
-CLI: `devices`, `sources`, `start --device ID --source ID --audio off|application|system`,
-`status`, `stop`, `doctor`. Refresh devices and sources before starting. Each
-response is JSON: `{ "api": 1, "ok": true, "result": ... }`, or an error.
-Friendly names are display data, not shell commands or device identities.
+## CLI
 
-## Privacy and lifecycle
+Human-readable output is the default:
 
-Window capture uses the window surface, never a desktop region. The user's
-explicit source choice in the GUI authorizes capture. This Hyprland-specific
-backend does not display a second portal prompt. Capture stops when source
-identity changes; it never switches to desktop capture.
+```sh
+caster devices
+caster sources
+caster start --device RECEIVER_ID --source SOURCE_ID \
+  --audio off --quality auto --bitrate auto
+caster status
+caster stop
+caster doctor
+```
 
-Application audio is matched only by process identity/ancestry. Matching
-Pulse-compatible PipeWire streams move into a private temporary sink, so they
-play on the TV rather than local speakers. Other applications keep their output.
-Browser audio is application-wide, not tab-isolated. Missing/ambiguous identity
-means silence, never a fallback to whole-system audio. Native PipeWire streams
-not exposed through the Pulse interface are not supported by this audio adapter.
-There can be a brief local-audio interval before newly created streams are routed.
+Automation and QML use `caster --json COMMAND`. That output is a versioned
+envelope: `{"api":1,"ok":true,"result":...}` or a structured error. Internal
+worker, recovery, and media commands are hidden from help and are not public API.
 
-The GUI offers whole-system audio only for screen mode, and only by explicit
-selection. Screen mode does not promise TV-only local muting.
+## Configuration and privacy
 
-The user service supervises children and restores audio on normal stop/error.
-ExecStopPost retries audio recovery if the worker is killed. Recovery only moves
-streams still on our unique sink and checks process start time before acting.
-No persistent PipeWire config, firewall rule, keybinding, or boot autostart is added.
+Caster uses private `caster` directories under the standard XDG config,
+runtime, and state roots. It remembers only receiver ID, source kind, audio,
+quality, and bitrate preferences. It does not persist a window title or window
+identity and never starts casting automatically.
 
-Diagnostics: `journalctl --user -u omacast-dev.service` and
-`~/.local/state/omacast-dev/session.log`. Logs/state stay private and can contain
-window titles/device names; redact before sharing. Media is not recorded.
+Production finds the transport as `caster-openscreen` on `PATH`. Developers may
+set `CASTER_SENDER` or `development.sender` in
+`$XDG_CONFIG_HOME/caster/config.json`. During migration, the old
+`omacast-dev/config.json` sender path is read as a compatibility fallback.
 
-## Extension boundaries
+Window capture is surface-based and never falls back to a desktop crop.
+Application audio matches process identity and ancestry and never falls back to
+the system mix. Runtime request/status data is private and media is never saved
+to disk. Logs should redact window titles before sharing.
 
-Capture owns compositor/window identity and source lifetime. Audio owns matching,
-temporary routing and recovery. Discovery owns receiver identity and addresses.
-Transport owns Open Screen-specific command/configuration. Session owns their
-lifetime and failure handling; neither QML nor a device profile may override
-privacy invariants. Configuration holds user policy; protocol constants stay in
-their owning modules. Shared types are limited to source, receiver, session and
-quality data rather than a generic globals/utils directory.
+## Contributing compatibility
 
-Contributors should add an adapter in the relevant subsystem, capability checks,
-tests and hardware evidence. Do not identify device behavior solely from its
-friendly name. Runtime downloadable code plugins, other desktops/protocols,
-hardware encoding and automatic TV resolution selection are not implemented.
+New OS, compositor, audio, discovery, transport, or supervisor support must
+implement the compile-time traits in `omarchy-caster-core`, report capabilities,
+fail closed, include fixtures/tests, and attach hardware evidence. Receiver
+quirks belong in the declarative profile data and are keyed by stable model or
+negotiated capabilities—not user-editable friendly names. V1 intentionally has
+no runtime code-plugin ABI.
 
-## Release gates
+## Current hardware evidence
 
-Before publication: validate GUI, window privacy under occlusion/resize/workspace
-changes, application audio with two simultaneous apps, restoration after failure,
-subsecond visible latency, and extended stability. Add reproducible Open Screen
-build packaging, dependency/license inventory, clean-environment CI and Arch
-packages. Preserve the existing FluxCast Live launcher as rollback until verified.
+The predecessor pipeline was confirmed on Master Bedroom TV with isolated
+window capture, no covering-window leakage, synchronized audio/video, and about
+one second visible delay. Those results establish the performance target; they
+do not yet check off the replacement Rust pipeline. See
+[docs/hardware-verification.md](docs/hardware-verification.md) for the full
+acceptance matrix.
 
-### Local verification (2026-09-22)
+## License
 
-- Rust unit tests cover source/process identity, capture command separation,
-  audio-mode privacy constraints, safe transport arguments, and rejection of
-  invalid/NaN stream statistics.
-- A live silent-audio test verifies that one process is rerouted, a second stays
-  untouched, and recovery from saved state restores the original sink and unloads
-  the private sink. Run explicitly with `cargo test live_routing -- --ignored
-  --test-threads=1`; never run it during an application-audio cast.
-- The window helper's actual frames decode as I420/YUV420P at 1920x1080. The first
-  build had a wrong raw-video codec tag; this was fixed after full decode testing.
-- Clock-window native streaming reports finite ~410 ms scheduled playout and
-  ~20 fps for a clock that redraws at 20 Hz. This excludes upstream capture and
-  is NOT a visual TV-side latency or quality confirmation.
-- The application-audio capture adapter is Pulse-compatible PipeWire only.
-  Native PipeWire-only clients are not claimed to work. TV audio and crash-path
-  service cleanup still require end-to-end validation.
-- User confirmed isolated-window casting on **Master Bedroom TV**, approximately
-  one-second visible delay, and no covering-window leakage. Earlier attempts
-  targeted Family room TV; do not conflate those receivers' test evidence.
-- Audible two-application test started on Master Bedroom TV: selected ffplay
-  window has a low 440 Hz beep every two seconds; a separate ffplay process has
-  an 880 Hz beep every second. Routing inspection confirms the first on the
-  private sink and the second on the original laptop sink. Actual TV listening
-  confirmation and stop/restoration validation are pending.
-
-## License and attribution
-
-Original code: GPL-3.0-only. Bundled Wayland XML protocols retain their embedded
-BSD-style notices. The external Open Screen sender and its dependencies retain
-their own licenses. The discovery design was informed by Aphrodine-wq/omacast
-(MIT); GUI integration follows Omarchy's documented component interfaces.
+Original code is GPL-3.0-only. Bundled Wayland protocol XML retains its embedded
+license notices. Open Screen, FFmpeg, PulseAudio, and their dependencies retain
+their respective upstream licenses.

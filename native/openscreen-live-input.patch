@@ -1,7 +1,7 @@
-diff --git i/cast/standalone_common/ffmpeg_glue.cc w/cast/standalone_common/ffmpeg_glue.cc
+diff --git a/cast/standalone_common/ffmpeg_glue.cc b/cast/standalone_common/ffmpeg_glue.cc
 index 5a9e4f4..8afe2f5 100644
---- i/cast/standalone_common/ffmpeg_glue.cc
-+++ w/cast/standalone_common/ffmpeg_glue.cc
+--- a/cast/standalone_common/ffmpeg_glue.cc
++++ b/cast/standalone_common/ffmpeg_glue.cc
 @@ -5,6 +5,7 @@
  #include "cast/standalone_common/ffmpeg_glue.h"
  
@@ -25,24 +25,121 @@ index 5a9e4f4..8afe2f5 100644
    if (result < 0) {
      OSP_LOG_ERROR << "Cannot open " << path << ": " << AvErrorToString(result);
      return nullptr;
-diff --git i/cast/standalone_sender/connection_settings.h w/cast/standalone_sender/connection_settings.h
-index 2c43096..0d49107 100644
---- i/cast/standalone_sender/connection_settings.h
-+++ w/cast/standalone_sender/connection_settings.h
-@@ -22,6 +22,8 @@ struct ConnectionSettings {
+diff --git a/cast/standalone_sender/connection_settings.h b/cast/standalone_sender/connection_settings.h
+index 2c43096..89eb602 100644
+--- a/cast/standalone_sender/connection_settings.h
++++ b/cast/standalone_sender/connection_settings.h
+@@ -22,6 +22,11 @@ struct ConnectionSettings {
  
    // The path to the file that we want to play.
    std::string path_to_file;
 +  // Optional separate live audio input (e.g. an inherited pipe).
 +  std::string audio_input_path;
++
++  // Optional inherited descriptor for versioned JSON-lines host events.
++  int event_fd = -1;
  
    // The maximum bitrate. Default value means a reasonable default will be
    // selected.
-diff --git i/cast/standalone_sender/looping_file_cast_agent.cc w/cast/standalone_sender/looping_file_cast_agent.cc
-index 38e222c..f5ea285 100644
---- i/cast/standalone_sender/looping_file_cast_agent.cc
-+++ w/cast/standalone_sender/looping_file_cast_agent.cc
-@@ -439,6 +439,12 @@ void LoopingFileCastAgent::OnStatisticsUpdated(
+diff --git a/cast/standalone_sender/looping_file_cast_agent.cc b/cast/standalone_sender/looping_file_cast_agent.cc
+index 38e222c..0f8d1b0 100644
+--- a/cast/standalone_sender/looping_file_cast_agent.cc
++++ b/cast/standalone_sender/looping_file_cast_agent.cc
+@@ -4,12 +4,17 @@
+ 
+ #include "cast/standalone_sender/looping_file_cast_agent.h"
+ 
++#include <cstdlib>
++#include <cerrno>
++#include <cmath>
+ #include <format>
+ #include <optional>
+ #include <string>
+ #include <utility>
+ #include <vector>
+ 
++#include <unistd.h>
++
+ #include "build/build_config.h"
+ #include "cast/common/channel/message_util.h"
+ #include "cast/common/public/cast_streaming_app_ids.h"
+@@ -58,6 +63,7 @@ void LoopingFileCastAgent::Connect(ConnectionSettings settings) {
+ 
+   OSP_CHECK(!connection_settings_);
+   connection_settings_ = std::move(settings);
++  EmitEvent("connecting");
+   const auto policy = connection_settings_->should_include_video
+                           ? DeviceMediaPolicy::kIncludesVideo
+                           : DeviceMediaPolicy::kAudioOnly;
+@@ -123,6 +129,7 @@ void LoopingFileCastAgent::OnError(SenderSocketFactory* factory,
+                                    const IPEndpoint& endpoint,
+                                    const Error& error) {
+   OSP_LOG_ERROR << "Cast agent received socket factory error: " << error;
++  EmitEvent("fatal", R"("code":"socket_factory")");
+   Shutdown();  // Never connected; nothing to notify.
+ }
+ 
+@@ -133,6 +140,7 @@ void LoopingFileCastAgent::OnClose(CastSocket* cast_socket) {
+ 
+ void LoopingFileCastAgent::OnError(CastSocket* socket, const Error& error) {
+   OSP_LOG_ERROR << "Cast agent received socket error: " << error;
++  EmitEvent("fatal", R"("code":"socket")");
+   Shutdown();  // The connection is broken; nothing to notify.
+ }
+ 
+@@ -350,8 +358,14 @@ void LoopingFileCastAgent::CreateAndStartSession() {
+                                                       : 0)};
+   // Use default display resolution of 1080P.
+   video_config.resolutions.emplace_back(Resolution{1920, 1080});
++  if (const char* fps = std::getenv("CASTER_FPS")) {
++    if (std::atoi(fps) > 0) {
++      video_config.max_frame_rate = SimpleFraction{std::atoi(fps), 1};
++    }
++  }
+ 
+   OSP_VLOG << "Starting session negotiation.";
++  EmitEvent("negotiating");
+   Error negotiation_error;
+   if (connection_settings_->use_remoting) {
+     cast_mode_ = CastMode::kRemoting;
+@@ -372,6 +386,7 @@ void LoopingFileCastAgent::CreateAndStartSession() {
+   }
+   if (!negotiation_error.ok()) {
+     OSP_LOG_ERROR << "Failed to negotiate a session: " << negotiation_error;
++    EmitEvent("fatal", R"("code":"negotiation")");
+   }
+ }
+ 
+@@ -383,9 +398,20 @@ void LoopingFileCastAgent::OnNegotiated(
+       (connection_settings_->should_include_audio &&
+        senders.audio_sender == nullptr)) {
+     OSP_LOG_ERROR << "Missing required senders, so exiting...";
++    EmitEvent("fatal", R"("code":"missing_senders")");
+     return;
+   }
+ 
++  const auto& video = capture_recommendations.video;
++  EmitEvent(
++      "negotiated",
++      std::format(
++          R"("max_width":{},"max_height":{},"max_fps":{},"max_bitrate":{},"supports_scaling":{})",
++          video.maximum.width, video.maximum.height,
++          static_cast<double>(video.maximum.frame_rate),
++          video.bit_rate_limits.maximum,
++          video.supports_scaling ? "true" : "false"));
++
+   current_negotiation_ =
+       std::make_unique<SenderSession::ConfiguredSenders>(std::move(senders));
+   if (cast_mode_ == CastMode::kMirroring || is_ready_for_remoting_) {
+@@ -396,6 +422,7 @@ void LoopingFileCastAgent::OnNegotiated(
+ void LoopingFileCastAgent::OnError(const SenderSession* session,
+                                    const Error& error) {
+   OSP_LOG_ERROR << "SenderSession fatal error: " << error;
++  EmitEvent("fatal", R"("code":"sender_session")");
+   RequestStop();
+ }
+ 
+@@ -439,6 +466,27 @@ void LoopingFileCastAgent::OnStatisticsUpdated(
    constexpr int kLoggingInterval = 10;
    if ((num_times_on_statistics_updated_called_++ % kLoggingInterval) == 0) {
      OSP_VLOG << __func__ << ": updated_stats=" << updated_stats;
@@ -52,13 +149,84 @@ index 38e222c..f5ea285 100644
 +                 << updated_stats.video_statistics[latency] << "ms audio="
 +                 << updated_stats.audio_statistics[latency] << "ms; video fps="
 +                 << updated_stats.video_statistics[fps];
++    const double video_latency = updated_stats.video_statistics[latency];
++    const double audio_latency = updated_stats.audio_statistics[latency];
++    const double video_fps = updated_stats.video_statistics[fps];
++    if (std::isfinite(video_latency) && video_latency >= 0.0 &&
++        std::isfinite(video_fps) && video_fps > 0.0) {
++      const std::string audio_value =
++          std::isfinite(audio_latency) && audio_latency >= 0.0
++              ? std::format("{}", audio_latency)
++              : "null";
++      EmitEvent(
++          "health",
++          std::format(
++              R"("video_latency_ms":{},"audio_latency_ms":{},"video_fps":{})",
++              video_latency, audio_value, video_fps));
++    }
    }
    last_reported_statistics_ = std::make_optional<SenderStats>(updated_stats);
  }
-diff --git i/cast/standalone_sender/looping_file_sender.cc w/cast/standalone_sender/looping_file_sender.cc
+@@ -464,6 +512,33 @@ void LoopingFileCastAgent::StartFileSender() {
+   is_ready_for_remoting_ = false;
+ }
+ 
++void LoopingFileCastAgent::EmitEvent(std::string_view event,
++                                     std::string_view fields) {
++  if (!connection_settings_ || connection_settings_->event_fd < 0) {
++    return;
++  }
++  std::string line = fields.empty()
++                         ? std::format(R"({{"api":1,"event":"{}"}})", event)
++                         : std::format(
++                               R"({{"api":1,"event":"{}",{}}})", event,
++                               fields);
++  line.push_back('\n');
++  const char* cursor = line.data();
++  size_t remaining = line.size();
++  while (remaining > 0) {
++    const ssize_t written =
++        write(connection_settings_->event_fd, cursor, remaining);
++    if (written > 0) {
++      cursor += written;
++      remaining -= static_cast<size_t>(written);
++    } else if (written < 0 && errno == EINTR) {
++      continue;
++    } else {
++      break;
++    }
++  }
++}
++
+ void LoopingFileCastAgent::Shutdown() {
+   TRACE_DEFAULT_SCOPED(TraceCategory::kStandaloneSender);
+   // No-op if nothing is scheduled (e.g. this wasn't reached via
+diff --git a/cast/standalone_sender/looping_file_cast_agent.h b/cast/standalone_sender/looping_file_cast_agent.h
+index f9a4e6d..8aae8f9 100644
+--- a/cast/standalone_sender/looping_file_cast_agent.h
++++ b/cast/standalone_sender/looping_file_cast_agent.h
+@@ -9,6 +9,7 @@
+ #include <memory>
+ #include <optional>
+ #include <string>
++#include <string_view>
+ #include <vector>
+ 
+ #include "cast/common/channel/cast_message_handler.h"
+@@ -175,6 +176,9 @@ class LoopingFileCastAgent final
+   // if the receiver is already ready.
+   void StartFileSender();
+ 
++  // Writes a single non-sensitive, versioned JSON event for the Rust host.
++  void EmitEvent(std::string_view event, std::string_view fields = {});
++
+   // Tears down the local session/connections/socket and invokes
+   // `shutdown_callback_`. Does not send anything to the Cast Receiver --
+   // callers that want to ask the receiver to stop should call RequestStop()
+diff --git a/cast/standalone_sender/looping_file_sender.cc b/cast/standalone_sender/looping_file_sender.cc
 index 34c05df..8c93b33 100644
---- i/cast/standalone_sender/looping_file_sender.cc
-+++ w/cast/standalone_sender/looping_file_sender.cc
+--- a/cast/standalone_sender/looping_file_sender.cc
++++ b/cast/standalone_sender/looping_file_sender.cc
 @@ -133,7 +133,9 @@ void LoopingFileSender::SendFileAgain() {
    capture_begin_time_ = latest_frame_time_ = env_.now() + seconds(1);
    if (settings_.should_include_audio) {
@@ -70,28 +238,31 @@ index 34c05df..8c93b33 100644
          audio_encoder_->sample_rate(), capture_begin_time_, *this);
    }
    video_capturer_ = std::make_unique<SimulatedVideoCapturer>(
-diff --git i/cast/standalone_sender/main.cc w/cast/standalone_sender/main.cc
-index 689e105..a4c9743 100644
---- i/cast/standalone_sender/main.cc
-+++ w/cast/standalone_sender/main.cc
-@@ -91,6 +91,8 @@ options:
+diff --git a/cast/standalone_sender/main.cc b/cast/standalone_sender/main.cc
+index 689e105..b5cbd46 100644
+--- a/cast/standalone_sender/main.cc
++++ b/cast/standalone_sender/main.cc
+@@ -91,6 +91,10 @@ options:
  
      -i, --enable-input-events: Enable receiving input events from the receiver.
  
 +    -A, --audio-input=path: Separate live audio input for pipe:0 video.
 +
++    -E, --event-fd=number: Write versioned JSON-lines host events to this fd.
++
  )";
  
    std::cerr << std::format(kTemplate, argv0, argv0, kDefaultCastPort,
-@@ -136,6 +138,7 @@ struct Arguments {
+@@ -136,6 +140,8 @@ struct Arguments {
    // Required positional arguments
    const char* iface_or_endpoint = nullptr;
    const char* file_path = nullptr;
 +  std::string audio_input_path;
++  int event_fd = -1;
  
    // Optional arguments
    int max_bitrate = kDefaultMaxBitrate;
-@@ -157,6 +160,7 @@ std::optional<Arguments> ParseArgs(int argc, char* argv[]) {
+@@ -157,9 +163,11 @@ std::optional<Arguments> ParseArgs(int argc, char* argv[]) {
    // standalone sender, osp demo, and test_main argument options.
    const get_opt::option kArgumentOptions[] = {
        {"android-hack", no_argument, nullptr, 'a'},
@@ -99,25 +270,38 @@ index 689e105..a4c9743 100644
        {"codec", required_argument, nullptr, 'c'},
        {"developer-certificate", required_argument, nullptr, 'd'},
        {"enable-input-events", no_argument, nullptr, 'i'},
-@@ -174,9 +178,12 @@ std::optional<Arguments> ParseArgs(int argc, char* argv[]) {
++      {"event-fd", required_argument, nullptr, 'E'},
+       {"help", no_argument, nullptr, 'h'},
+       {"max-bitrate", required_argument, nullptr, 'm'},
+       {"no-looping", no_argument, nullptr, 'n'},
+@@ -174,9 +182,20 @@ std::optional<Arguments> ParseArgs(int argc, char* argv[]) {
  
    Arguments args;
    int ch = -1;
 -  while ((ch = getopt_long(argc, argv, "ac:d:him:nqrtvP", kArgumentOptions,
-+  while ((ch = getopt_long(argc, argv, "aA:c:d:him:nqrtvP", kArgumentOptions,
++  while ((ch = getopt_long(argc, argv, "aA:c:d:E:him:nqrtvP", kArgumentOptions,
                             nullptr)) != -1) {
      switch (ch) {
 +      case 'A':
 +        args.audio_input_path = get_opt::optarg;
 +        break;
++      case 'E':
++        if (!ParseAsciiNumber(get_opt::optarg, args.event_fd) ||
++            args.event_fd < 3) {
++          OSP_LOG_ERROR << "Invalid --event-fd specified: "
++                        << get_opt::optarg;
++          return std::nullopt;
++        }
++        break;
        case 'a':
          args.use_android_rtp_hack = true;
          break;
-@@ -294,8 +301,11 @@ int StandaloneSenderMain(int argc, char* argv[]) {
+@@ -294,8 +313,12 @@ int StandaloneSenderMain(int argc, char* argv[]) {
  
      cast_agent->Connect({.receiver_endpoint = remote_endpoint,
                           .path_to_file = args->file_path,
 +                         .audio_input_path = args->audio_input_path,
++                         .event_fd = args->event_fd,
                           .max_bitrate = args->max_bitrate,
                           .should_include_video = true,
 +                         .should_include_audio = !args->audio_input_path.empty() ||
@@ -125,21 +309,91 @@ index 689e105..a4c9743 100644
                           .use_android_rtp_hack = args->use_android_rtp_hack,
                           .use_remoting = args->use_remoting,
                           .should_loop_video = args->should_loop_video,
-diff --git i/cast/standalone_sender/simulated_capturer.cc w/cast/standalone_sender/simulated_capturer.cc
-index 4ec6750..1fb6a53 100644
---- i/cast/standalone_sender/simulated_capturer.cc
+diff --git a/cast/standalone_sender/streaming_ffmpeg_encoder.cc b/cast/standalone_sender/streaming_ffmpeg_encoder.cc
+index 8697217..812068c 100644
+--- a/cast/standalone_sender/streaming_ffmpeg_encoder.cc
++++ b/cast/standalone_sender/streaming_ffmpeg_encoder.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "cast/standalone_sender/streaming_ffmpeg_encoder.h"
+ 
++#include <cstdlib>
+ #include <algorithm>
+ #include <climits>
+ #include <cmath>
+@@ -80,7 +81,13 @@ void ApplyLowLatencyOptions(const AVCodec* codec,
+   // Codec-specific private AVOptions:
+   switch (GetEncoderBackend(codec)) {
+     case FfmpegEncoderBackend::kLibx264_Libx265:
+-      av_dict_set(opts, "preset", "ultrafast", 0);
++      // Caster: faster is much sharper than ultrafast at the same bitrate and
++      // costs ~3 cores at 1080p60 (medium cannot hold 60 fps). CASTER_X264_PRESET overrides.
++      av_dict_set(opts, "preset",
++                  std::getenv("CASTER_X264_PRESET")
++                      ? std::getenv("CASTER_X264_PRESET")
++                      : "faster",
++                  0);
+       av_dict_set(opts, "tune", "zerolatency", 0);
+       // Ensure forced keyframes produce IDR frames with parameter sets.
+       av_dict_set(opts, "forced-idr", "1", 0);
+@@ -342,12 +349,17 @@ void StreamingFfmpegEncoder::PrepareEncoder(int width,
+     context->height = height;
+     context->pix_fmt = AV_PIX_FMT_YUV420P;
+     context->time_base = AVRational{1, sender_->config().rtp_timebase};
+-    context->framerate = AVRational{30, 1};
++    context->framerate = AVRational{
++        std::getenv("CASTER_FPS") ? std::max(1, std::atoi(std::getenv("CASTER_FPS")))
++                                  : 30,
++        1};
+     context->bit_rate = target_bitrate;
+     context->rc_max_rate = target_bitrate;
+     // Set VBV buffer to 500ms of target bitrate for real-time Cast rate
+     // control.
+-    context->rc_buffer_size = target_bitrate / 2;
++    // Caster: 1 s of VBV lets keyframes and scene changes borrow bits instead
++    // of being crushed.
++    context->rc_buffer_size = target_bitrate;
+     // Disable periodic keyframes; keyframes are generated on-demand by Cast.
+     context->gop_size = 999999;
+     context->keyint_min = 999999;
+@@ -378,7 +390,7 @@ void StreamingFfmpegEncoder::PrepareEncoder(int width,
+     // libx264 dynamically handles bitrate updates via x264_encoder_reconfig.
+     encoder_->context->bit_rate = target_bitrate;
+     encoder_->context->rc_max_rate = target_bitrate;
+-    encoder_->context->rc_buffer_size = target_bitrate / 2;
++    encoder_->context->rc_buffer_size = target_bitrate;
+   }
+ }
+ 
+diff --git a/cast/streaming/impl/sender_impl.cc b/cast/streaming/impl/sender_impl.cc
+index 940d22a..e7f4c5d 100644
+--- a/cast/streaming/impl/sender_impl.cc
++++ b/cast/streaming/impl/sender_impl.cc
+@@ -27,7 +27,7 @@ namespace {
+ // low-latency networks (roughly two video frames at 30 FPS). See
+ // crbug.com/498035450.
+ constexpr Clock::duration kMinSenderInFlight =
+-    Clock::to_duration(milliseconds(66));
++    Clock::to_duration(milliseconds(250));
+ 
+ }  // namespace
+ 
+diff --git c/cast/standalone_sender/simulated_capturer.cc w/cast/standalone_sender/simulated_capturer.cc
+index 4ec6750..1d805d4 100644
+--- c/cast/standalone_sender/simulated_capturer.cc
 +++ w/cast/standalone_sender/simulated_capturer.cc
-@@ -11,6 +11,9 @@
+@@ -11,6 +11,10 @@
  #include <ratio>
  #include <sstream>
  #include <thread>
 +#include <string_view>
 +#include <cstdlib>
 +#include <poll.h>
++#include <time.h>
  
  #include "cast/standalone_common/ffmpeg_glue.h"
  #include "cast/streaming/public/environment.h"
-@@ -40,6 +43,10 @@ SimulatedCapturer::SimulatedCapturer(Environment& environment,
+@@ -40,6 +44,10 @@ SimulatedCapturer::SimulatedCapturer(Environment& environment,
        packet_(MakeUniqueAVPacket()),
        decoded_frame_(MakeUniqueAVFrame()),
        next_task_(environment.now_function(), environment.task_runner()) {
@@ -150,7 +404,7 @@ index 4ec6750..1fb6a53 100644
    if (!format_context_) {
      OnError("MakeUniqueAVFormatContext", AVERROR_UNKNOWN);
      return;  // Capturer is halted (unable to start).
-@@ -70,6 +77,10 @@ SimulatedCapturer::SimulatedCapturer(Environment& environment,
+@@ -70,6 +78,10 @@ SimulatedCapturer::SimulatedCapturer(Environment& environment,
    // max here, just to be safe.
    decoder_context_->thread_count =
        std::min(std::max<int>(std::thread::hardware_concurrency(), 1), 8);
@@ -161,7 +415,7 @@ index 4ec6750..1fb6a53 100644
    const int params_result = avcodec_parameters_to_context(
        decoder_context_.get(),
        format_context_->streams[stream_index_]->codecpar);
-@@ -137,6 +148,17 @@ void SimulatedCapturer::StartDecodingNextFrame() {
+@@ -137,6 +149,17 @@ void SimulatedCapturer::StartDecodingNextFrame() {
      return;
    }
  
@@ -179,37 +433,69 @@ index 4ec6750..1fb6a53 100644
    capture_begin_time_ = now_();
    const int read_frame_result =
        av_read_frame(format_context_.get(), packet_.get());
-@@ -225,6 +247,18 @@ void SimulatedCapturer::ConsumeNextDecodedFrame() {
+@@ -225,6 +248,48 @@ void SimulatedCapturer::ConsumeNextDecodedFrame() {
      return;  // Stop. Fatal error occurred.
    }
    reference_time += *delay_adjustment_or_null;
 +  if (live_input_) {
-+    if (media_type_ == AVMEDIA_TYPE_AUDIO) {
-+      if (!live_audio_next_time_) {
-+        live_audio_next_time_ = now_();
-+      }
-+      reference_time = *live_audio_next_time_;
-+      *live_audio_next_time_ += ToApproximateClockDuration(
-+          decoded_frame_->nb_samples, AVRational{1, decoded_frame_->sample_rate});
++    // Live helpers run in separate processes and stamp each packet with its
++    // capture time on CLOCK_MONOTONIC (microseconds). Convert that to this
++    // process's clock by back-dating by the packet's age, so audio and video
++    // keep their true capture offset instead of their arrival offset.
++    timespec monotonic_now{};
++    clock_gettime(CLOCK_MONOTONIC, &monotonic_now);
++    const int64_t now_us = int64_t{monotonic_now.tv_sec} * 1000000 +
++                           monotonic_now.tv_nsec / 1000;
++    const int64_t capture_us =
++        std::chrono::duration_cast<std::chrono::microseconds>(frame_timestamp)
++            .count();
++    const int64_t age_us = now_us - capture_us;
++    // Generous so a briefly slow consumer keeps draining on the capture clock
++    // instead of falling into the legacy pacing, which never catches up.
++    constexpr int64_t kMaxLiveAgeUs = 30000000;
++    if (age_us >= 0 && age_us <= kMaxLiveAgeUs) {
++      reference_time = now_() - std::chrono::microseconds(age_us);
 +    } else {
-+      reference_time = now_();
++      // Older helpers stamp with frame/sample counters rather than capture
++      // time. Keep their previous pacing: video at arrival, audio on a
++      // free-running sample clock.
++      if (!warned_legacy_live_timestamps_) {
++        warned_legacy_live_timestamps_ = true;
++        OSP_LOG_WARN << "Live "
++                     << av_get_media_type_string(media_type_)
++                     << " timestamps are not on the capture clock; using "
++                        "legacy arrival pacing";
++      }
++      if (media_type_ == AVMEDIA_TYPE_AUDIO) {
++        if (!live_audio_next_time_) {
++          live_audio_next_time_ = now_();
++        }
++        reference_time = *live_audio_next_time_;
++        *live_audio_next_time_ += ToApproximateClockDuration(
++            decoded_frame_->nb_samples,
++            AVRational{1, decoded_frame_->sample_rate});
++      } else {
++        reference_time = now_();
++      }
 +    }
 +  }
  
    next_task_.Schedule(
        [this, reference_time] {
-diff --git i/cast/standalone_sender/simulated_capturer.h w/cast/standalone_sender/simulated_capturer.h
-index 5dcb0bc..b1360f6 100644
---- i/cast/standalone_sender/simulated_capturer.h
+diff --git c/cast/standalone_sender/simulated_capturer.h w/cast/standalone_sender/simulated_capturer.h
+index 5dcb0bc..d1aacf0 100644
+--- c/cast/standalone_sender/simulated_capturer.h
 +++ w/cast/standalone_sender/simulated_capturer.h
-@@ -115,6 +115,10 @@ class SimulatedCapturer {
+@@ -115,6 +115,12 @@ class SimulatedCapturer {
    // Used to determine playback rate. Currently, we only support "playing"
    // at 1x speed, or "pausing" at 0x speed.
    bool playback_rate_is_non_zero_ = true;
-+  // Experimental live NUT input: desktop video or separate system audio pipe.
++  // Experimental live NUT input: desktop video or separate system audio pipe,
++  // both stamped with CLOCK_MONOTONIC capture time by their helpers.
 +  bool live_input_ = false;
 +  int live_input_fd_ = -1;
 +  std::optional<Clock::time_point> live_audio_next_time_;
++  bool warned_legacy_live_timestamps_ = false;
  };
  
  // Emits the primary audio stream from a file.

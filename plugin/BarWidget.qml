@@ -88,8 +88,16 @@ Panel {
     text: "󰄘"
     active: root.active
     tooltipText: root.active ? "Casting to " + (caster.session.device || "receiver") : "Caster"
-    onClicked: root.toggle()
-    onRightClicked: caster.refresh()
+    onPressed: function(button) {
+      if (button === Qt.RightButton) caster.refresh()
+      else root.toggle()
+    }
+  }
+
+  Shortcut {
+    sequence: "Escape"
+    enabled: root.opened
+    onActivated: root.close()
   }
 
   KeyboardPanel {
@@ -101,12 +109,6 @@ Panel {
     focusTarget: root.active ? stopButton : castButton
     contentWidth: panel.fittedContentWidth(Style.space(420))
     contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(680))
-
-    Shortcut {
-      sequence: "Escape"
-      enabled: root.opened
-      onActivated: root.close()
-    }
 
     Flickable {
       id: scroller

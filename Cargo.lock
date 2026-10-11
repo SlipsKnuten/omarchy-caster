@@ -418,6 +418,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "omarchy-caster-audio-pulse"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ffmpeg-next",
+ "rustix",
+]
+
+[[package]]
 name = "omarchy-caster-capture-hyprland"
 version = "0.1.0"
 dependencies = [
@@ -441,6 +450,7 @@ dependencies = [
  "clap",
  "libc",
  "mdns-sd",
+ "omarchy-caster-audio-pulse",
  "omarchy-caster-capture-hyprland",
  "omarchy-caster-core",
  "serde",

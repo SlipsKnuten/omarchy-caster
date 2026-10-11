@@ -15,3 +15,9 @@ receiver IDs, logs, build artifacts, or private configuration.
 Use an ADR for decisions that change a public contract, privacy boundary,
 process architecture, or long-term dependency. Ordinary implementation details
 belong in code and tests.
+
+Receiver compatibility updates belong in
+`crates/caster-core/data/receiver-profiles.json`. Use stable model identifiers
+from discovery and document the hardware evidence; never select behavior from a
+friendly room/device name. Host integrations belong in a focused crate and
+implement the applicable trait from `omarchy-caster-core/src/adapters.rs`.

@@ -30,25 +30,25 @@ submission are deliberately deferred.
   with domain enums and typed DTOs.
 - [x] Define compile-time adapter traits for receiver discovery, capture,
   audio, transport, and session supervision.
-- [ ] Add a static feature-gated backend registry and typed capability report;
+- [x] Add a static feature-gated backend registry and typed capability report;
   do not add a runtime plugin ABI in v1.
-- [ ] Add declarative Google Cast receiver profiles keyed by stable model and
+- [x] Add declarative Google Cast receiver profiles keyed by stable model and
   capability data, never friendly names.
 - [x] Keep only product-wide constants in a shared constants module; colocate
   timeouts, protocol values, and defaults with their owners.
 - [ ] Use narrowly named XDG, process, atomic-storage, and serialization
   modules rather than generic `globals` or `utils` folders.
-- [ ] Add fake adapters and fixture-driven contract tests so new OS/device
+- [x] Add fake adapters and fixture-driven contract tests so new OS/device
   implementations can be tested without hardware.
 
 ## 3. Full Rust host media pipeline
 
-- [ ] Replace the C window helper with Rust Hyprland toplevel-export capture.
+- [x] Replace the C window helper with Rust Hyprland toplevel-export capture.
 - [ ] Replace `wf-recorder` with Rust wlroots screencopy output capture.
-- [ ] Generate Wayland bindings from bundled protocol XML at build time.
+- [x] Generate Wayland bindings from bundled protocol XML at build time.
 - [ ] Reuse shared-memory buffers, handle source resize/closure, pace from a
   monotonic clock, and keep only the newest pending video frame.
-- [ ] Scale and letterbox without stretching into a stable I420 canvas.
+- [x] Scale and letterbox without stretching into a stable I420 canvas.
 - [ ] Replace FFmpeg subprocesses with Rust FFmpeg bindings for conversion and
   NUT framing.
 - [ ] Replace repeated `pactl` polling with a Rust Pulse-compatible adapter for
@@ -60,9 +60,9 @@ submission are deliberately deferred.
 
 ## 4. Google Cast transport and quality negotiation
 
-- [ ] Turn the Open Screen modifications into a clean local fork commit series
+- [x] Turn the Open Screen modifications into a clean local fork commit series
   pinned to an upstream revision; public fork publication remains deferred.
-- [ ] Replace log scraping with versioned JSON-lines events on a dedicated file
+- [x] Replace log scraping with versioned JSON-lines events on a dedicated file
   descriptor.
 - [ ] Emit negotiation, receiver display constraints, resolved stream quality,
   health metrics, scheduled playout, and structured fatal errors.
@@ -70,24 +70,24 @@ submission are deliberately deferred.
   recommendations rather than a model-name guess.
 - [ ] Support receiver-aware Auto, 720p30, and 1080p30 while preserving source
   proportions; cap current mirroring at 1920x1080/30 fps.
-- [ ] Support Auto, 4, 6, and 8 Mbps bitrate choices, clamped to receiver
+- [x] Support Auto, 4, 6, and 8 Mbps bitrate choices, clamped to receiver
   recommendations.
 - [ ] Add bounded reconnect/backoff behavior for rapid receiver reconnects.
 
 ## 5. Lifecycle, configuration, and CLI
 
-- [ ] Keep an on-demand transient worker and place systemd operations behind a
+- [x] Keep an on-demand transient worker and place systemd operations behind a
   typed Rust supervisor adapter.
-- [ ] Use typed session states: idle, discovering, connecting, negotiating,
+- [x] Use typed session states: idle, discovering, connecting, negotiating,
   streaming, stopping, and error.
-- [ ] Make stop idempotent and ensure an already-ended session returns to idle
+- [x] Make stop idempotent and ensure an already-ended session returns to idle
   instead of retaining stale error state.
 - [ ] Add versioned configuration and state under Caster XDG directories.
-- [ ] Remember only the last receiver, source kind, audio preference, and
+- [x] Remember only the last receiver, source kind, audio preference, and
   quality; never persist a window title/identity or auto-start a cast.
-- [ ] Remove production dependence on machine-specific absolute binary paths;
+- [x] Remove production dependence on machine-specific absolute binary paths;
   retain explicit development overrides only.
-- [ ] Provide human output by default and a versioned `--json` envelope for:
+- [x] Provide human output by default and a versioned `--json` envelope for:
   `devices`, `sources`, `start`, `status`, `stop`, and `doctor`.
 - [ ] Keep worker/recovery commands internal and document public exit/error
   behavior.
@@ -98,11 +98,11 @@ submission are deliberately deferred.
 
 - [x] Move the manifest to repository root and validate the repository directly
   with `omarchy plugin validate`.
-- [ ] Replace the development `PopupCard` with Omarchy's native `Panel` and
+- [x] Replace the development `PopupCard` with Omarchy's native `Panel` and
   first-party panel primitives.
-- [ ] Split QML into a panel, pure state/model logic, and narrowly scoped shared
+- [x] Split QML into a panel, pure state/model logic, and narrowly scoped shared
   components.
-- [ ] Add a clear idle flow: receiver rows, Applications/Screens selector,
+- [x] Add a clear idle flow: receiver rows, Applications/Screens selector,
   contextual audio choice, one Cast action, and folded Advanced settings.
 - [ ] Add an active view showing receiver, source, resolved quality, audio,
   health, connection stages, and a prominent Stop action.
@@ -110,22 +110,22 @@ submission are deliberately deferred.
   and recovery states with Retry/Refresh/Diagnostics actions.
 - [ ] Support mouse and keyboard navigation, long labels, narrow panels, and
   horizontal/vertical bars using Omarchy theme primitives.
-- [ ] Watch the atomic status file instead of spawning `caster status` every
+- [x] Watch the atomic status file instead of spawning `caster status` every
   second; discover only on panel open or explicit refresh.
-- [ ] Serialize UI actions so rapid clicks cannot race start and stop.
+- [x] Serialize UI actions so rapid clicks cannot race start and stop.
 
 ## 7. Automated verification
 
-- [ ] `cargo fmt --all --check` passes.
-- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- [x] `cargo fmt --all --check` passes.
+- [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
   passes.
-- [ ] All unit and integration tests pass with the lockfile.
+- [x] All unit and integration tests pass with the lockfile.
 - [ ] Synthetic capture output decodes as valid I420/NUT at every supported
   preset and survives resize/format/orientation changes.
 - [ ] Audio tests cover ancestry, new streams after start, PID reuse, isolation,
   restoration, and forced failure.
-- [ ] API fixtures lock JSON compatibility and every session state transition.
-- [ ] QML lint/model tests pass and `omarchy plugin validate` accepts the root.
+- [x] API fixtures lock JSON compatibility and every session state transition.
+- [x] QML lint/model tests pass and `omarchy plugin validate` accepts the root.
 - [ ] Dependency/license checks account for bundled protocols, FFmpeg/Pulse
   bindings, and the Open Screen fork.
 

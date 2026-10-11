@@ -1,0 +1,9 @@
+{
+  "upstream": "https://github.com/chromium/openscreen.git",
+  "upstreamCommit": "648ab4c0b05f9f464e36e4c89ef0559cb61b0b81",
+  "localCheckout": "../openscreen-lab/openscreen",
+  "localBranch": "caster-live-input",
+  "casterCommits": ["1b0ab25", "c259e18", "146cca8", "f69d2f6"],
+  "patch": "openscreen-live-input.patch",
+  "target": "cast_sender"
+}

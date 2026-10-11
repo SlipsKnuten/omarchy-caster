@@ -22,10 +22,28 @@ capture     audio      Google Cast transport
                           Open Screen sender --> receiver
 ```
 
-The current migration still uses the tested native helper, Pulse-compatible
-commands, FFmpeg, and a patched Open Screen executable behind those boundaries.
-The production-readiness work replaces host-side helpers with Rust adapters
-without changing the media/transport contract all at once.
+Window capture, video conversion/framing, and Pulse-compatible audio capture now
+run in Rust. Whole-output capture temporarily uses `wf-recorder`; application
+audio routing temporarily uses focused `pactl` operations. A patched Open Screen
+executable remains the stable C++ transport boundary. The earlier C window
+helper stays in the tree only as a rollback artifact until hardware parity is
+signed off.
+
+## A/V timing
+
+Audio and video are captured by separate processes, so both stamp every packet
+with its capture time on `CLOCK_MONOTONIC` (microseconds). Video stamps when the
+frame is acquired. Audio derives packet times from its sample count, corrected
+toward the observed time (`now - pa_simple_get_latency - duration`): small
+errors are slewed to follow device clock drift, larger ones re-anchor after a
+stall. The sender back-dates each packet by its age, so the receiver sees the
+true capture offset rather than arrival order. The audio capture stream is
+requested with 20 ms fragments and at most 200 ms of server-side buffering;
+PulseAudio's default is seconds, which turned any startup stall into a
+permanent audio delay. Timestamps more than 30 s old fall back to arrival
+time with a warning, which covers older helpers. See ADR 0006. The
+`wf-recorder` screen path does not yet carry capture time and still uses
+arrival-time stamping.
 
 ## Crate and adapter boundaries
 
@@ -35,7 +53,8 @@ without changing the media/transport contract all at once.
   stores requests atomically, and supervises one session worker.
 - Capture owns source enumeration, stable source identity, frame acquisition,
   scaling, and source-lifetime validation.
-- Audio owns application matching, private routing, capture, and restoration.
+- Audio owns application matching, private routing, direct Pulse capture, NUT
+  framing, and restoration.
 - Transport owns receiver discovery, negotiation, Cast-specific profiles, and
   sender events.
 - Supervision owns systemd interaction and process-tree cleanup.
@@ -46,7 +65,8 @@ one adapter may never silently substitute a broader privacy scope.
 
 ## State and configuration
 
-Configuration, runtime state, and logs use separate XDG roots. Runtime JSON is
+Versioned configuration, runtime state, and logs use separate `caster` XDG
+roots. Runtime JSON is
 written atomically with private permissions. The public session state machine
 is `idle -> connecting -> negotiating -> streaming -> stopping -> idle`, with
 `error` as a cleaned-up terminal state. Stop is idempotent.
@@ -75,3 +95,8 @@ restore only streams Caster moved.
 
 See `docs/adr/` for the rationale behind binding decisions and
 `docs/hardware-verification.md` for verified compatibility claims.
+
+The transport fork is pinned by `native/openscreen-revision.json`. Its Caster
+change is one commit on top of the recorded Chromium Open Screen revision, and
+the same diff is retained as `native/openscreen-live-input.patch` for review and
+reproduction until the public fork is published.

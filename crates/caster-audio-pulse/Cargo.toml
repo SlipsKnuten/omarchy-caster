@@ -1,0 +1,16 @@
+[package]
+name = "omarchy-caster-audio-pulse"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Pulse-compatible audio capture adapter for Caster"
+autoexamples = false
+
+[[example]]
+name = "synthetic_audio_nut"
+path = "examples/synthetic_nut.rs"
+
+[dependencies]
+anyhow = "1"
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format"] }
+rustix = { version = "1", features = ["time"] }

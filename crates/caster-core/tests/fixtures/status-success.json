@@ -1,0 +1,16 @@
+{
+  "api": 1,
+  "ok": true,
+  "result": {
+    "state": "idle",
+    "detail": "Ready",
+    "device": "",
+    "source": "",
+    "source_id": "",
+    "device_id": "",
+    "source_kind": null,
+    "audio_detail": "",
+    "scheduled_playout": "",
+    "resolved_quality": ""
+  }
+}

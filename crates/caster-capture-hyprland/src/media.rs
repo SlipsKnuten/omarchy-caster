@@ -16,8 +16,14 @@ pub struct NutVideoWriter {
     width: u32,
     height: u32,
     fps: u32,
+    output_time_base: Rational,
     frame_number: i64,
+    last_pts_us: Option<i64>,
 }
+
+/// Stream time base. Packets carry capture time on the shared monotonic clock
+/// so the sender can align video with audio captured by another process.
+const TIME_BASE: Rational = Rational(1, 1_000_000);
 
 impl NutVideoWriter {
     pub fn open(path: impl AsRef<Path>, width: u32, height: u32, fps: u32) -> Result<Self> {
@@ -44,9 +50,9 @@ impl NutVideoWriter {
             parameters.set_format(Pixel::YUV420P);
             parameters.set_aspect_ratio(Rational(1, 1));
             parameters.set_frame_rate(Some(Rational(i32::try_from(fps)?, 1)));
-            parameters.set_time_base(Rational(1, i32::try_from(fps)?));
+            parameters.set_time_base(TIME_BASE);
             stream.set_parameters(&parameters);
-            stream.set_time_base(Rational(1, i32::try_from(fps)?));
+            stream.set_time_base(TIME_BASE);
             stream.set_avg_frame_rate(Rational(i32::try_from(fps)?, 1));
             unsafe {
                 (*stream.parameters().as_mut_ptr()).codec_tag =
@@ -54,17 +60,35 @@ impl NutVideoWriter {
             }
         }
         output.write_header()?;
+        let output_time_base = output
+            .stream(0)
+            .context("NUT output contains no video stream")?
+            .time_base();
         Ok(Self {
             output,
             width,
             height,
             fps,
+            output_time_base,
             frame_number: 0,
+            last_pts_us: None,
         })
     }
 
+    /// Write a frame at a synthetic, perfectly paced timestamp.
     pub fn write_frame(&mut self, source: &Frame) -> Result<()> {
+        let pts_us = self.frame_number * 1_000_000 / i64::from(self.fps);
+        self.write_frame_at(source, pts_us)
+    }
+
+    /// Write a frame stamped with its capture time in microseconds on
+    /// `CLOCK_MONOTONIC`. Timestamps are forced strictly increasing.
+    pub fn write_frame_at(&mut self, source: &Frame, capture_us: i64) -> Result<()> {
         validate_frame(source)?;
+        let pts_us = self
+            .last_pts_us
+            .map_or(capture_us, |last| capture_us.max(last + 1));
+        self.last_pts_us = Some(pts_us);
         let source_pixel = match source.format {
             PixelFormat::Xrgb8888 | PixelFormat::Argb8888 => Pixel::BGRA,
             PixelFormat::Xbgr8888 | PixelFormat::Abgr8888 => Pixel::RGBA,
@@ -107,11 +131,12 @@ impl NutVideoWriter {
         copy_yuv420(&scaled, &mut canvas, left, top)?;
         let payload = pack_yuv420(&canvas)?;
         let mut packet = Packet::copy(&payload);
-        packet.set_pts(Some(self.frame_number));
-        packet.set_dts(Some(self.frame_number));
-        packet.set_duration(1);
+        packet.set_pts(Some(pts_us));
+        packet.set_dts(Some(pts_us));
+        packet.set_duration(1_000_000 / i64::from(self.fps));
         packet.set_stream(0);
         packet.set_position(-1);
+        packet.rescale_ts(TIME_BASE, self.output_time_base);
         packet.write(&mut self.output)?;
         self.frame_number += 1;
         Ok(())
@@ -213,6 +238,7 @@ fn pack_yuv420(frame: &Video) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn aspect_ratio_is_preserved_and_offsets_are_even() {
@@ -242,5 +268,90 @@ mod tests {
             data: vec![0; 8],
         };
         assert!(validate_frame(&frame).is_err());
+    }
+
+    #[test]
+    fn supported_presets_decode_with_real_time_timestamps() {
+        ffmpeg::init().unwrap();
+        let source = Frame {
+            width: 4,
+            height: 4,
+            stride: 16,
+            format: PixelFormat::Argb8888,
+            y_invert: false,
+            timestamp_ns: 0,
+            data: vec![0x80; 64],
+        };
+        for (width, height) in [(1280, 720), (1920, 1080)] {
+            let path = std::env::temp_dir().join(format!(
+                "caster-video-{}-{width}x{height}.nut",
+                std::process::id()
+            ));
+            let mut writer = NutVideoWriter::open(&path, width, height, 30).unwrap();
+            for _ in 0..3 {
+                writer.write_frame(&source).unwrap();
+            }
+            writer.finish().unwrap();
+
+            let mut input = format::input(&path).unwrap();
+            let stream = input.stream(0).unwrap();
+            let time_base = stream.time_base();
+            let mut decoder = codec::context::Context::from_parameters(stream.parameters())
+                .unwrap()
+                .decoder()
+                .video()
+                .unwrap();
+            assert_eq!((decoder.width(), decoder.height()), (width, height));
+            assert_eq!(decoder.format(), Pixel::YUV420P);
+            let mut timestamps = Vec::new();
+            let mut decoded = 0;
+            for (_, packet) in input.packets() {
+                timestamps.push(packet.pts().unwrap());
+                decoder.send_packet(&packet).unwrap();
+                let mut frame = Video::empty();
+                while decoder.receive_frame(&mut frame).is_ok() {
+                    decoded += 1;
+                }
+            }
+            assert_eq!(decoded, 3);
+            assert_eq!(timestamps.len(), 3);
+            let tick = timestamps[1] - timestamps[0];
+            let seconds = f64::from(i32::try_from(tick).unwrap())
+                * f64::from(time_base.numerator())
+                / f64::from(time_base.denominator());
+            // Microsecond time base: allow one tick of rounding.
+            assert!((seconds - 1.0 / 30.0).abs() < 2e-6);
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn capture_timestamps_are_preserved_and_monotonic() {
+        ffmpeg::init().unwrap();
+        let source = Frame {
+            width: 4,
+            height: 4,
+            stride: 16,
+            format: PixelFormat::Argb8888,
+            y_invert: false,
+            timestamp_ns: 0,
+            data: vec![0x80; 64],
+        };
+        let path = std::env::temp_dir().join(format!("caster-video-at-{}.nut", std::process::id()));
+        let mut writer = NutVideoWriter::open(&path, 1280, 720, 30).unwrap();
+        // The last capture time goes backwards and must be nudged forward.
+        for capture_us in [5_000_000_000, 5_000_040_000, 5_000_030_000] {
+            writer.write_frame_at(&source, capture_us).unwrap();
+        }
+        writer.finish().unwrap();
+        let mut input = format::input(&path).unwrap();
+        let time_base = input.stream(0).unwrap().time_base();
+        assert_eq!(
+            (time_base.numerator(), time_base.denominator()),
+            (1, 1_000_000)
+        );
+        let timestamps: Vec<i64> = input.packets().map(|(_, p)| p.pts().unwrap()).collect();
+        assert_eq!(timestamps, [5_000_000_000, 5_000_040_000, 5_000_040_001]);
+        fs::remove_file(path).unwrap();
     }
 }

@@ -37,8 +37,10 @@ pub fn command(source: &Source, q: Quality) -> Result<Command> {
             if source.name.is_empty() {
                 bail!("Empty monitor");
             }
+            // Lanczos for text, explicit BT.709 limited range to match the sender's
+            // stream tags. The pad is a no-op when the output is already 16:9.
             let canvas = format!(
-                "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1",
+                "scale={}:{}:force_original_aspect_ratio=decrease:flags=lanczos+accurate_rnd+full_chroma_int:out_color_matrix=bt709:out_range=tv,format=yuv420p,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1",
                 q.width, q.height, q.width, q.height
             );
             let mut cmd = Command::new("wf-recorder");

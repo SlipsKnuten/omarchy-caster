@@ -69,6 +69,10 @@ struct CaptureState {
     manager: Option<HyprlandToplevelExportManagerV1>,
     buffer: Option<WlBuffer>,
     mapping: Option<MmapMut>,
+    allocated_width: u32,
+    allocated_height: u32,
+    allocated_stride: u32,
+    allocated_format: Option<PixelFormat>,
     width: u32,
     height: u32,
     stride: u32,
@@ -87,6 +91,10 @@ impl CaptureState {
             manager: None,
             buffer: None,
             mapping: None,
+            allocated_width: 0,
+            allocated_height: 0,
+            allocated_stride: 0,
+            allocated_format: None,
             width: 0,
             height: 0,
             stride: 0,
@@ -100,10 +108,6 @@ impl CaptureState {
     }
 
     fn reset_frame(&mut self) {
-        if let Some(buffer) = self.buffer.take() {
-            buffer.destroy();
-        }
-        self.mapping = None;
         self.width = 0;
         self.height = 0;
         self.stride = 0;
@@ -133,6 +137,19 @@ impl CaptureState {
             .checked_mul(usize::try_from(self.height)?)
             .context("Window buffer is too large")?;
         anyhow::ensure!(size <= i32::MAX as usize, "Window buffer is too large");
+        if let (Some(buffer), Some(_)) = (&self.buffer, &self.mapping)
+            && self.allocated_width == self.width
+            && self.allocated_height == self.height
+            && self.allocated_stride == self.stride
+            && self.allocated_format == self.format
+        {
+            frame.copy(buffer, 1);
+            return Ok(());
+        }
+        if let Some(buffer) = self.buffer.take() {
+            buffer.destroy();
+        }
+        self.mapping = None;
         let fd = memfd_create("caster-window", MemfdFlags::CLOEXEC)?;
         rustix::fs::ftruncate(&fd, u64::try_from(size)?)?;
         let file = File::from(fd);
@@ -158,6 +175,10 @@ impl CaptureState {
         frame.copy(&buffer, 1);
         self.buffer = Some(buffer);
         self.mapping = Some(mapping);
+        self.allocated_width = self.width;
+        self.allocated_height = self.height;
+        self.allocated_stride = self.stride;
+        self.allocated_format = self.format;
         Ok(())
     }
 }
@@ -330,7 +351,7 @@ impl WindowCapturer {
         let mapping = self
             .state
             .mapping
-            .take()
+            .as_ref()
             .context("Capture returned no pixels")?;
         let format = self
             .state
@@ -345,6 +366,14 @@ impl WindowCapturer {
             timestamp_ns: self.state.timestamp_ns,
             data: mapping.as_ref().to_vec(),
         })
+    }
+}
+
+impl Drop for WindowCapturer {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.state.buffer.take() {
+            buffer.destroy();
+        }
     }
 }
 

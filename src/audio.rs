@@ -44,6 +44,8 @@ struct Route {
 #[derive(Deserialize, Serialize)]
 struct Routes {
     name: String,
+    #[serde(default)]
+    previous_default: Option<String>,
     routes: BTreeMap<String, Route>,
 }
 
@@ -92,9 +94,6 @@ pub fn belongs_to(mut pid: u32, owner: u32, identity: &str) -> bool {
     }
     false
 }
-pub fn default_monitor() -> Result<String> {
-    Ok(format!("{}.monitor", pactl(&["get-default-sink"])?))
-}
 pub fn recover() -> Result<()> {
     let path = storage::directory(storage::Directory::Runtime)?.join("audio.json");
     if !path.exists() {
@@ -116,7 +115,9 @@ pub fn recover() -> Result<()> {
             if row["sink"] != own["index"] {
                 continue;
             }
-            if input_pid(&row).and_then(process_identity).as_deref() != Some(&previous.identity) {
+            if !previous.identity.is_empty()
+                && input_pid(&row).and_then(process_identity).as_deref() != Some(&previous.identity)
+            {
                 continue;
             }
             let target = if sinks
@@ -129,6 +130,14 @@ pub fn recover() -> Result<()> {
             };
             pactl(&["move-sink-input", &index.to_string(), &target])?;
         }
+    }
+    if let Some(previous) = &state.previous_default
+        && pactl(&["get-default-sink"]).ok().as_deref() == Some(&state.name)
+        && sinks
+            .iter()
+            .any(|s| s["name"].as_str() == Some(previous.as_str()))
+    {
+        pactl(&["set-default-sink", previous])?;
     }
     let exact_arg = format!("sink_name={}", state.name);
     // PipeWire's pactl JSON module list may omit index; the short format includes it.
@@ -147,13 +156,18 @@ pub fn recover() -> Result<()> {
 }
 pub struct AppAudio {
     source: Source,
+    /// Whole-screen casts take every stream so the laptop speakers stay silent.
+    everything: bool,
     state: Routes,
 }
 impl AppAudio {
-    pub fn new(source: Source) -> Result<Self> {
+    pub fn new(source: Source, everything: bool) -> Result<Self> {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let state = Routes {
             name: format!("omacast_dev_{}_{nonce}", std::process::id()),
+            previous_default: everything
+                .then(|| pactl(&["get-default-sink"]))
+                .transpose()?,
             routes: BTreeMap::new(),
         };
         storage::write(
@@ -168,14 +182,23 @@ impl AppAudio {
             "rate=48000",
             "channels=2",
         ])?;
-        Ok(Self { source, state })
+        if everything {
+            // New streams start on the private sink instead of the laptop speakers.
+            pactl(&["set-default-sink", &state.name])?;
+        }
+        Ok(Self {
+            source,
+            everything,
+            state,
+        })
     }
     pub fn monitor(&self) -> String {
         format!("{}.monitor", self.state.name)
     }
     pub fn update(&mut self) -> Result<String> {
         anyhow::ensure!(
-            process_identity(self.source.pid).as_deref() == Some(&self.source.identity),
+            self.everything
+                || process_identity(self.source.pid).as_deref() == Some(&self.source.identity),
             "Selected application exited"
         );
         let sinks = rows("sinks")?;
@@ -185,10 +208,10 @@ impl AppAudio {
             .context("Application audio sink disappeared")?;
         let mut matched = 0;
         for row in rows("sink-inputs")? {
-            let Some(pid) = input_pid(&row) else {
-                continue;
-            };
-            if !belongs_to(pid, self.source.pid, &self.source.identity) {
+            let pid = input_pid(&row);
+            if !self.everything
+                && !pid.is_some_and(|pid| belongs_to(pid, self.source.pid, &self.source.identity))
+            {
                 continue;
             }
             matched += 1;
@@ -205,7 +228,13 @@ impl AppAudio {
             else {
                 continue;
             };
-            let identity = process_identity(pid).context("Audio application disappeared")?;
+            let identity = match pid {
+                Some(pid) if !self.everything => {
+                    process_identity(pid).context("Audio application disappeared")?
+                }
+                Some(pid) => process_identity(pid).unwrap_or_default(),
+                None => String::new(),
+            };
             self.state.routes.insert(
                 index.to_string(),
                 Route {
@@ -219,7 +248,9 @@ impl AppAudio {
             )?;
             pactl(&["move-sink-input", &index.to_string(), &self.state.name])?;
         }
-        Ok(if matched > 0 {
+        Ok(if matched > 0 && self.everything {
+            "System audio → TV only"
+        } else if matched > 0 {
             "Application audio → TV"
         } else {
             "No matching app audio; sending silence"
@@ -227,32 +258,10 @@ impl AppAudio {
         .to_owned())
     }
 }
-pub fn command(monitor: &str) -> Command {
-    let mut cmd = Command::new("ffmpeg");
-    cmd.args([
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "pulse",
-        "-fragment_size",
-        "3840",
-        "-i",
-        monitor,
-        "-ac",
-        "2",
-        "-ar",
-        "48000",
-        "-c:a",
-        "pcm_f32le",
-        "-flush_packets",
-        "1",
-        "-f",
-        "nut",
-        "pipe:1",
-    ]);
-    cmd
+pub fn command(monitor: &str) -> Result<Command> {
+    let mut command = Command::new(std::env::current_exe()?);
+    command.args(["capture-audio", "--monitor", monitor]);
+    Ok(command)
 }
 
 #[cfg(test)]
@@ -340,7 +349,7 @@ mod tests {
             identity: process_identity(selected).unwrap(),
             app: "ffplay".into(),
         };
-        let mut routing = AppAudio::new(source).unwrap();
+        let mut routing = AppAudio::new(source, false).unwrap();
         assert_eq!(routing.update().unwrap(), "Application audio → TV");
         let sinks = rows("sinks").unwrap();
         let own = sinks

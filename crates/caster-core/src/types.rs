@@ -199,6 +199,25 @@ impl fmt::Display for SessionState {
     }
 }
 
+impl SessionState {
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        use SessionState::{
+            Connecting, Discovering, Error, Idle, Negotiating, Stopping, Streaming,
+        };
+        self as u8 == next as u8
+            || matches!(
+                (self, next),
+                (Idle, Discovering | Connecting | Error)
+                    | (Discovering, Idle | Connecting | Error)
+                    | (Connecting, Negotiating | Streaming | Stopping | Error)
+                    | (Negotiating, Streaming | Stopping | Error)
+                    | (Streaming, Stopping | Error)
+                    | (Stopping, Idle | Error)
+                    | (Error, Idle | Connecting)
+            )
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Status {
     pub state: SessionState,
@@ -212,7 +231,7 @@ pub struct Status {
     #[serde(default)]
     pub device_id: String,
     #[serde(default)]
-    pub source_kind: String,
+    pub source_kind: Option<SourceKind>,
     #[serde(default)]
     pub audio_detail: String,
     #[serde(default)]
@@ -230,7 +249,7 @@ impl Default for Status {
             source: String::new(),
             source_id: String::new(),
             device_id: String::new(),
-            source_kind: String::new(),
+            source_kind: None,
             audio_detail: String::new(),
             scheduled_playout: String::new(),
             resolved_quality: String::new(),
@@ -297,5 +316,49 @@ mod tests {
             serde_json::to_string(&SessionState::Streaming).unwrap(),
             "\"streaming\""
         );
+    }
+
+    #[test]
+    fn session_transitions_are_explicit_and_bounded() {
+        use SessionState::*;
+        let states = [
+            Idle,
+            Discovering,
+            Connecting,
+            Negotiating,
+            Streaming,
+            Stopping,
+            Error,
+        ];
+        let allowed = [
+            (Idle, Discovering),
+            (Idle, Connecting),
+            (Idle, Error),
+            (Discovering, Idle),
+            (Discovering, Connecting),
+            (Discovering, Error),
+            (Connecting, Negotiating),
+            (Connecting, Streaming),
+            (Connecting, Stopping),
+            (Connecting, Error),
+            (Negotiating, Streaming),
+            (Negotiating, Stopping),
+            (Negotiating, Error),
+            (Streaming, Stopping),
+            (Streaming, Error),
+            (Stopping, Idle),
+            (Stopping, Error),
+            (Error, Idle),
+            (Error, Connecting),
+        ];
+        for from in states {
+            for to in states {
+                assert_eq!(
+                    from.can_transition_to(to),
+                    from == to || allowed.contains(&(from, to)),
+                    "unexpected transition {from:?} -> {to:?}"
+                );
+            }
+        }
     }
 }

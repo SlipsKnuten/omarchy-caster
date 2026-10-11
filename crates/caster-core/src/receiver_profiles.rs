@@ -45,7 +45,8 @@ pub fn resolve_quality(
     let mut quality = Quality::resolve(preset, bitrate);
     quality.width = quality.width.min(profile.max_width);
     quality.height = quality.height.min(profile.max_height);
-    quality.fps = quality.fps.min(profile.max_fps);
+    // Each profile's maximum is verified on hardware, so use it by default.
+    quality.fps = profile.max_fps;
     quality.bitrate = match bitrate {
         BitrateChoice::Auto => profile.recommended_bitrate,
         _ => quality.bitrate.min(profile.max_bitrate),
@@ -74,7 +75,7 @@ mod tests {
         for profile in profiles {
             assert!(profile.max_width <= 1920);
             assert!(profile.max_height <= 1080);
-            assert!(profile.max_fps <= 30);
+            assert!(profile.max_fps <= 60);
             assert!(profile.recommended_bitrate <= profile.max_bitrate);
             assert!(profile.max_bitrate <= 8_000_000);
         }
@@ -90,6 +91,15 @@ mod tests {
             profile_for(&receiver("Unknown model")).id,
             "google-cast-default"
         );
+    }
+
+    #[test]
+    fn chromecast_ultra_streams_at_60_fps_others_at_30() {
+        let ultra =
+            |model| resolve_quality(&receiver(model), QualityPreset::Auto, BitrateChoice::Auto).1;
+        assert_eq!(ultra("Chromecast Ultra").fps, 60);
+        assert_eq!(ultra("Unknown model").fps, 30);
+        assert_eq!(ultra("4K Google TV Stick").fps, 30);
     }
 
     #[test]

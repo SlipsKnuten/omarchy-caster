@@ -3,6 +3,7 @@ mod backends;
 mod capture;
 mod config;
 mod discovery;
+mod display;
 mod session;
 mod storage;
 mod supervisor;
@@ -61,6 +62,11 @@ enum Action {
         #[arg(long)]
         fps: u32,
     },
+    #[command(hide = true)]
+    CaptureAudio {
+        #[arg(long)]
+        monitor: String,
+    },
 }
 
 impl Action {
@@ -75,6 +81,7 @@ impl Action {
             Self::Worker => "worker",
             Self::Recover => "recover",
             Self::CaptureWindow { .. } => "capture-window",
+            Self::CaptureAudio { .. } => "capture-audio",
         }
     }
 }
@@ -122,6 +129,7 @@ fn run(action: Action) -> Result<Value> {
         })),
         Action::Recover => {
             audio::recover()?;
+            display::recover()?;
             Ok(json!({}))
         }
         Action::Worker => {
@@ -148,6 +156,7 @@ fn run(action: Action) -> Result<Value> {
                 }
                 supervisor::stop()?;
                 audio::recover()?;
+                display::recover()?;
                 let idle = session::Status {
                     state: SessionState::Idle,
                     detail: "Stopped; audio routing restored".into(),
@@ -201,6 +210,7 @@ fn run(action: Action) -> Result<Value> {
             config::binaries()?;
             config::remember(&request)?;
             audio::recover()?;
+            display::recover()?;
             storage::write(&root.join("request.json"), &request)?;
             storage::write(
                 &root.join("status.json"),
@@ -280,6 +290,15 @@ fn main() -> ExitCode {
             },
         );
         return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if let Action::CaptureAudio { monitor } = action {
+        return match caster_audio_pulse::stream_monitor(&monitor) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("{error:#}");

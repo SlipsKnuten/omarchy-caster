@@ -1,5 +1,6 @@
 //! Rust Hyprland capture adapter.
 
+mod clock;
 pub mod media;
 mod protocol;
 pub mod window;
@@ -10,6 +11,7 @@ use std::{
     fs,
     path::Path,
     process::Command,
+    sync::{Arc, Condvar, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -147,23 +149,70 @@ pub fn validate_source(selected: &Source) -> Result<()> {
 /// reuse the backend without duplicating its media pipeline.
 pub fn stream_window(address: &str, quality: Quality) -> Result<()> {
     anyhow::ensure!(quality.fps > 0, "Frame rate must be positive");
-    let mut capture = window::WindowCapturer::connect(address)?;
     let mut output = media::NutVideoWriter::open(
         Path::new("pipe:1"),
         quality.width,
         quality.height,
         quality.fps,
     )?;
-    let epoch = Instant::now();
-    let frame_interval = Duration::from_secs_f64(1.0 / f64::from(output.fps()));
-    let mut frame_number = 0_u32;
-    loop {
-        output.write_frame(&capture.next_frame()?)?;
-        frame_number = frame_number.wrapping_add(1);
-        let deadline = epoch + frame_interval.mul_f64(f64::from(frame_number));
-        if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-            thread::sleep(remaining);
+    let shared = Arc::new((Mutex::new(LatestFrame::default()), Condvar::new()));
+    let producer_state = shared.clone();
+    let address = address.to_owned();
+    let fps = output.fps();
+    thread::spawn(move || {
+        let result = (|| -> Result<()> {
+            let mut capture = window::WindowCapturer::connect(&address)?;
+            let epoch = Instant::now();
+            let frame_interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+            let mut frame_number = 0_u32;
+            loop {
+                let frame = capture.next_frame()?;
+                // Stamp at capture so downstream queueing and scaling never
+                // shift the frame relative to audio from the other process.
+                let captured_us = clock::monotonic_micros();
+                let (lock, ready) = &*producer_state;
+                lock.lock().unwrap().publish(frame, captured_us);
+                ready.notify_one();
+                frame_number = frame_number.wrapping_add(1);
+                let deadline = epoch + frame_interval.mul_f64(f64::from(frame_number));
+                if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+                    thread::sleep(remaining);
+                }
+            }
+        })();
+        if let Err(error) = result {
+            let (lock, ready) = &*producer_state;
+            lock.lock().unwrap().failure = Some(format!("{error:#}"));
+            ready.notify_one();
         }
+    });
+    loop {
+        let (lock, ready) = &*shared;
+        let mut latest = lock.lock().unwrap();
+        while latest.frame.is_none() && latest.failure.is_none() {
+            latest = ready.wait(latest).unwrap();
+        }
+        if let Some(failure) = latest.failure.take() {
+            anyhow::bail!(failure);
+        }
+        let frame = latest.frame.take().expect("frame checked above");
+        let latest_captured_us = latest.captured_us;
+        drop(latest);
+        output.write_frame_at(&frame, latest_captured_us)?;
+    }
+}
+
+#[derive(Default)]
+struct LatestFrame {
+    frame: Option<window::Frame>,
+    captured_us: i64,
+    failure: Option<String>,
+}
+
+impl LatestFrame {
+    fn publish(&mut self, frame: window::Frame, captured_us: i64) {
+        self.frame = Some(frame);
+        self.captured_us = captured_us;
     }
 }
 
@@ -185,5 +234,24 @@ mod tests {
     fn window_handles_are_data_not_commands() {
         assert_eq!(window_handle("0x1234").unwrap(), 0x1234);
         assert!(window_handle("0x12;command").is_err());
+    }
+
+    #[test]
+    fn latest_frame_replaces_stale_pending_frame() {
+        use window::{Frame, PixelFormat};
+        let frame = |timestamp_ns| Frame {
+            width: 1,
+            height: 1,
+            stride: 4,
+            format: PixelFormat::Argb8888,
+            y_invert: false,
+            timestamp_ns,
+            data: vec![0; 4],
+        };
+        let mut latest = LatestFrame::default();
+        latest.publish(frame(1), 10);
+        latest.publish(frame(2), 20);
+        assert_eq!(latest.captured_us, 20);
+        assert_eq!(latest.frame.unwrap().timestamp_ns, 2);
     }
 }

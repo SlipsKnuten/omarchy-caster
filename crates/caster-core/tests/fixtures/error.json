@@ -1,0 +1,8 @@
+{
+  "api": 1,
+  "ok": false,
+  "error": {
+    "code": "fixture_error",
+    "message": "fixture message"
+  }
+}

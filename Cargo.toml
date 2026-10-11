@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/caster-core", "crates/caster-capture-hyprland"]
+members = [
+  "crates/caster-audio-pulse",
+  "crates/caster-core",
+  "crates/caster-capture-hyprland",
+]
 resolver = "3"
 
 [package]
@@ -22,6 +26,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+caster-audio-pulse = { package = "omarchy-caster-audio-pulse", path = "crates/caster-audio-pulse" }
 caster-capture-hyprland = { package = "omarchy-caster-capture-hyprland", path = "crates/caster-capture-hyprland" }
 caster-core = { package = "omarchy-caster-core", path = "crates/caster-core" }
 clap = { version = "4", features = ["derive"] }
