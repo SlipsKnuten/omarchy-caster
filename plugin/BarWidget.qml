@@ -18,6 +18,7 @@ Panel {
   property bool advancedOpen: false
   property string quality: "auto"
   property string bitrate: "auto"
+  readonly property string installGuideUrl: "https://github.com/SlipsKnuten/omarchy-caster#install"
 
   readonly property bool active: Model.isActive(caster.session.state)
   readonly property var visibleSources: Model.byKind(caster.sources, sourceKind)
@@ -106,7 +107,7 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: root.active ? stopButton : castButton
+    focusTarget: root.active ? stopButton : (caster.ready ? castButton : guideButton)
     contentWidth: panel.fittedContentWidth(Style.space(420))
     contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(680))
 
@@ -140,6 +141,73 @@ Panel {
               color: root.active ? Color.accent : root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.display
+            }
+          }
+        }
+
+        Column {
+          visible: caster.installChecked && !caster.ready
+          width: parent.width
+          spacing: Style.space(10)
+
+          PanelSectionHeader {
+            text: "SETUP REQUIRED"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Text {
+            width: parent.width
+            text: "Caster is installed as a plugin, but it needs its helper programs before it can cast."
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Repeater {
+            model: caster.setupIssues
+            Text {
+              required property var modelData
+              width: parent.width
+              text: "\u2022 " + modelData
+              textFormat: Text.PlainText
+              wrapMode: Text.WordWrap
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+          }
+
+          Text {
+            width: parent.width
+            text: "Follow the install steps, then check again."
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.spacing.controlGap
+
+            Button {
+              id: guideButton
+              width: (parent.width - parent.spacing) / 2
+              text: "Install guide"
+              bordered: true
+              focusable: true
+              onClicked: Quickshell.execDetached(["xdg-open", root.installGuideUrl])
+            }
+            Button {
+              width: (parent.width - parent.spacing) / 2
+              text: caster.scanning ? "Checking\u2026" : "Check again"
+              bordered: true
+              focusable: true
+              onClicked: caster.refresh()
             }
           }
         }
@@ -199,7 +267,7 @@ Panel {
         }
 
         Column {
-          visible: !root.active
+          visible: !root.active && caster.ready
           width: parent.width
           spacing: Style.space(12)
 
