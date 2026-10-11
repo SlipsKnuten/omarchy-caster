@@ -3,7 +3,6 @@
 mod clock;
 pub mod media;
 mod protocol;
-mod stats;
 pub mod window;
 
 use anyhow::{Context, Result};
@@ -158,8 +157,6 @@ pub fn stream_window(address: &str, quality: Quality) -> Result<()> {
     )?;
     let shared = Arc::new((Mutex::new(LatestFrame::default()), Condvar::new()));
     let producer_state = shared.clone();
-    let stats = Arc::new(Mutex::new(stats::IntervalStats::default()));
-    let producer_stats = stats.clone();
     let address = address.to_owned();
     let fps = output.fps();
     thread::spawn(move || {
@@ -169,21 +166,12 @@ pub fn stream_window(address: &str, quality: Quality) -> Result<()> {
             let frame_interval = Duration::from_secs_f64(1.0 / f64::from(fps));
             let mut frame_number = 0_u32;
             loop {
-                let requested = Instant::now();
                 let frame = capture.next_frame()?;
-                let waited = requested.elapsed();
                 // Stamp at capture so downstream queueing and scaling never
                 // shift the frame relative to audio from the other process.
                 let captured_us = clock::monotonic_micros();
                 let (lock, ready) = &*producer_state;
-                let replaced = lock.lock().unwrap().publish(frame, captured_us);
-                {
-                    let mut stats = producer_stats.lock().unwrap();
-                    stats.record_capture(waited);
-                    if replaced {
-                        stats.record_replaced();
-                    }
-                }
+                lock.lock().unwrap().publish(frame, captured_us);
                 ready.notify_one();
                 frame_number = frame_number.wrapping_add(1);
                 let deadline = epoch + frame_interval.mul_f64(f64::from(frame_number));
@@ -198,17 +186,11 @@ pub fn stream_window(address: &str, quality: Quality) -> Result<()> {
             ready.notify_one();
         }
     });
-    let mut last_report = Instant::now();
     loop {
         let (lock, ready) = &*shared;
         let mut latest = lock.lock().unwrap();
         while latest.frame.is_none() && latest.failure.is_none() {
-            // Wake periodically so a stalled compositor still reports.
-            latest = ready
-                .wait_timeout(latest, stats::REPORT_INTERVAL)
-                .unwrap()
-                .0;
-            report_if_due(&stats, &mut last_report);
+            latest = ready.wait(latest).unwrap();
         }
         if let Some(failure) = latest.failure.take() {
             anyhow::bail!(failure);
@@ -216,19 +198,7 @@ pub fn stream_window(address: &str, quality: Quality) -> Result<()> {
         let frame = latest.frame.take().expect("frame checked above");
         let latest_captured_us = latest.captured_us;
         drop(latest);
-        let started = Instant::now();
         output.write_frame_at(&frame, latest_captured_us)?;
-        stats.lock().unwrap().record_write(started.elapsed());
-        report_if_due(&stats, &mut last_report);
-    }
-}
-
-fn report_if_due(stats: &Mutex<stats::IntervalStats>, last_report: &mut Instant) {
-    let elapsed = last_report.elapsed();
-    if elapsed >= stats::REPORT_INTERVAL {
-        let line = stats.lock().unwrap().take_report(elapsed);
-        eprintln!("{line}");
-        *last_report = Instant::now();
     }
 }
 
@@ -240,12 +210,9 @@ struct LatestFrame {
 }
 
 impl LatestFrame {
-    /// Store the newest frame. Returns whether it replaced one the writer had
-    /// not taken yet.
-    fn publish(&mut self, frame: window::Frame, captured_us: i64) -> bool {
-        let replaced = self.frame.replace(frame).is_some();
+    fn publish(&mut self, frame: window::Frame, captured_us: i64) {
+        self.frame = Some(frame);
         self.captured_us = captured_us;
-        replaced
     }
 }
 
@@ -282,8 +249,8 @@ mod tests {
             data: vec![0; 4],
         };
         let mut latest = LatestFrame::default();
-        assert!(!latest.publish(frame(1), 10));
-        assert!(latest.publish(frame(2), 20));
+        latest.publish(frame(1), 10);
+        latest.publish(frame(2), 20);
         assert_eq!(latest.captured_us, 20);
         assert_eq!(latest.frame.unwrap().timestamp_ns, 2);
     }

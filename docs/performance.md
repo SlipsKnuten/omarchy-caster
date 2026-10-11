@@ -35,9 +35,11 @@ been measured in watts yet; the CPU figures above are the evidence.
 
 ## Focused versus hidden window
 
-The capture helper logs one `capture-stats` line every 2 s to
-`~/.local/state/caster/session.log`. Across switching the casted window between
-a hidden workspace and the focused one:
+These numbers came from a development build of the capture helper that logs one
+`capture-stats` line every 2 s. That telemetry is deliberately **not** in
+`main`, so released builds do not write it to users' log files; it lives on the
+`dev` branch. Across switching the casted window between a hidden workspace and
+the focused one:
 
 | Casted window | Compositor wait per export | Frames captured | Caster convert+write | Dropped |
 |---|---|---|---|---|
@@ -71,11 +73,14 @@ None of these has been tried, so none is a promise:
 
 ## Reproduce
 
-Start a window cast, then read the telemetry:
+Build the `dev` branch and start a window cast, then read the telemetry:
 
 ```sh
+git checkout dev
+cargo build --release --locked
 grep capture-stats ~/.local/state/caster/session.log | tail -20
 ```
 
 Each line reports captured and written frames per second, frames replaced before
-they were written, and mean/max compositor wait and convert+write time.
+they were written, and mean/max compositor wait and convert+write time. Use the
+`main` branch for normal use.
